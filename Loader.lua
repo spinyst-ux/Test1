@@ -115,6 +115,7 @@ local SETTINGS = {
     WaitForPlayers = true,
     AutoDodgeEnabled = true,
     BlackScreen = false,
+    AutoHideUI = false,
     CustomName = "",
     RenameParty = true,
     LogoAvatar = true,
@@ -942,6 +943,7 @@ TargetPartySize = SETTINGS.TargetPartySize,
 WaitForPlayers = SETTINGS.WaitForPlayers,
 AutoDodgeEnabled = SETTINGS.AutoDodgeEnabled,
 BlackScreen = SETTINGS.BlackScreen,
+AutoHideUI = SETTINGS.AutoHideUI,
 CustomName = SETTINGS.CustomName,
 RenameParty = SETTINGS.RenameParty,
 LogoAvatar = SETTINGS.LogoAvatar,
@@ -1145,15 +1147,73 @@ local function applyBlackScreen(enabled, skipSave)
             bg.BorderSizePixel = 0
             bg.Parent = gui
 
-            local hint = Instance.new("TextLabel")
-            hint.Size = UDim2.new(1, 0, 0, 24)
-            hint.Position = UDim2.new(0, 0, 1, -40)
-            hint.BackgroundTransparency = 1
-            hint.Text = "Black Screen active - press RightCtrl to disable"
-            hint.TextColor3 = Color3.fromRGB(70, 70, 80)
-            hint.Font = Enum.Font.Gotham
-            hint.TextSize = 13
-            hint.Parent = bg
+            -- centered info panel: logo + live stats
+            -- faint full-screen logo watermark (the embedded logo is written to the workspace so Roblox can load it)
+            pcall(function()
+                local path = FOLDER_NAME .. "/nclbg.png"
+                if writefile and getcustomasset then
+                    writefile(path, getLogoBytes())
+                    local wm = Instance.new("ImageLabel")
+                    wm.AnchorPoint = Vector2.new(0.5, 0.5)
+                    wm.Position = UDim2.new(0.5, 0, 0.5, 0)
+                    wm.Size = UDim2.new(1, 0, 1, 0)
+                    wm.BackgroundTransparency = 1
+                    wm.Image = getcustomasset(path)
+                    wm.ScaleType = Enum.ScaleType.Fit
+                    wm.ImageTransparency = 0.88
+                    wm.Parent = bg
+                end
+            end)
+
+            local panel = Instance.new("Frame")
+            panel.AnchorPoint = Vector2.new(0.5, 0.5)
+            panel.Position = UDim2.new(0.5, 0, 0.5, 0)
+            panel.Size = UDim2.new(1, 0, 0, 560)
+            panel.BackgroundTransparency = 1
+            panel.Parent = bg
+
+            local logoHolder = Instance.new("Frame")
+            logoHolder.AnchorPoint = Vector2.new(0.5, 0)
+            logoHolder.Position = UDim2.new(0.5, 0, 0, 0)
+            logoHolder.Size = UDim2.new(0, 110, 0, 110)
+            logoHolder.BackgroundTransparency = 1
+            logoHolder.Parent = panel
+            pcall(function() if UI.createLogoMark then UI.createLogoMark(logoHolder, 2) end end)
+
+            local info = Instance.new("TextLabel")
+            info.Position = UDim2.new(0, 0, 0, 130)
+            info.Size = UDim2.new(1, 0, 0, 430)
+            info.BackgroundTransparency = 1
+            info.TextColor3 = Color3.fromRGB(255, 255, 255)
+            info.Font = Enum.Font.GothamBold
+            info.TextSize = 36
+            info.TextYAlignment = Enum.TextYAlignment.Top
+            info.Text = ""
+            info.Parent = panel
+
+            local function refreshInfo()
+                local custom = tostring(SETTINGS.CustomName or ""):gsub("^%s+", ""):gsub("%s+$", "")
+                local elapsed = os.clock() - runStartTime
+                local lines = {
+                    "NCL HUB",
+                    "DUNGEON QUEST REBORN",
+                    player.Name:upper(),
+                    "LEVEL " .. displayNumber(findPlayerStat({"Level", "level", "Lvl"}) or findHudNumber({"level", "lvl"})),
+                    "GOLD " .. displayCurrency(findPlayerStat({"Gold", "gold", "Coins", "Money"}) or findHudNumber({"gold", "coin", "money"})),
+                    "GEMS " .. displayCurrency(findPlayerStat({"Gems", "gems", "Diamonds", "Gem"}) or findHudNumber({"gem", "diamond"})),
+                    "PARTY " .. tostring(#Players:GetPlayers()),
+                    string.format("TIME RUNNING %dm %ds", math.floor(elapsed / 60), math.floor(elapsed % 60)),
+                    "TIME LEFT " .. readTimeLeft(),
+                }
+                info.Text = (table.concat(lines, "\n"):gsub("%*%*", ""))
+            end
+            refreshInfo()
+            task.spawn(function()
+                while not isCleaningUp and gui.Parent do
+                    if gui.Enabled then pcall(refreshInfo) end
+                    task.wait(1)
+                end
+            end)
 
             UI.blackGui = gui
         end
@@ -1225,6 +1285,7 @@ local function createLogoMark(parent, zIndex)
     gradient.Parent = mark
     return box
 end
+UI.createLogoMark = createLogoMark
 -- 4. INTERFACE INITIALIZATION
 
 local applyConfigData -- defined in section 5, used by the config import button
@@ -1397,6 +1458,13 @@ UI.blackScreenQuickBtn.Font = Enum.Font.GothamBold
 UI.blackScreenQuickBtn.TextSize = 15
 UI.blackScreenQuickBtn.TextColor3 = T.text
 UI.blackScreenQuickBtn.Text = "🌑"
+
+UI.autoHideQuickBtn = makeWindowButton(622)
+UI.autoHideQuickBtn.Font = Enum.Font.GothamBold
+UI.autoHideQuickBtn.TextSize = 15
+UI.autoHideQuickBtn.TextColor3 = T.text
+UI.autoHideQuickBtn.Text = "👁"
+statusLabel.Size = UDim2.new(0, 200, 1, 0)
 
 local minimizeBtn = makeWindowButton(706)
 makeBar(minimizeBtn, 14, 2)
@@ -2002,6 +2070,8 @@ UI.buildStatus.TextYAlignment = Enum.TextYAlignment.Top
 
 UI.blackScreenRow = MakeButton("Black Screen (RightCtrl): OFF", T.idle, miscPage)
 UI.blackScreenRow.LayoutOrder = 103
+UI.autoHideRow = MakeButton("Auto Hide UI: " .. (SETTINGS.AutoHideUI and "ON" or "OFF"), SETTINGS.AutoHideUI and Color3.fromRGB(40, 150, 70) or T.idle, miscPage)
+UI.autoHideRow.LayoutOrder = 104
 UI.autoLobbyRow = MakeButton("Auto Lobby Routine: " .. (SETTINGS.AutoLobbyEnabled and "ON" or "OFF"), SETTINGS.AutoLobbyEnabled and Color3.fromRGB(40, 150, 70) or T.idle, miscPage)
 UI.roleRow = MakeButton("Lobby Role: " .. SETTINGS.LobbyMode:upper(), Color3.fromRGB(58, 80, 200), miscPage)
 
@@ -2316,6 +2386,41 @@ local function setMinimized(state)
     end
 end
 minimizeBtn.MouseButton1Click:Connect(function() setMinimized(not isUIMinimized) end)
+UI.setMinimized = setMinimized
+function UI.refreshAutoHideBtns()
+    local on = SETTINGS.AutoHideUI
+    if UI.autoHideRow then
+        UI.autoHideRow.Text = "Auto Hide UI: " .. (on and "ON" or "OFF")
+        UI.autoHideRow.BackgroundColor3 = on and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
+    end
+    if UI.autoHideQuickBtn then
+        UI.autoHideQuickBtn.BackgroundColor3 = on and Color3.fromRGB(40, 150, 70) or T.field
+    end
+end
+local function toggleAutoHide()
+    SETTINGS.AutoHideUI = not SETTINGS.AutoHideUI
+    UI.refreshAutoHideBtns()
+    saveConfig()
+end
+UI.autoHideRow.MouseButton1Click:Connect(toggleAutoHide)
+UI.autoHideQuickBtn.MouseButton1Click:Connect(toggleAutoHide)
+UI.refreshAutoHideBtns()
+-- auto hide: whenever the window is open with the toggle ON, it minimizes 2 seconds later (every time it is reopened)
+task.spawn(function()
+    local shownSince
+    while not isCleaningUp do
+        if SETTINGS.AutoHideUI and not isUIMinimized then
+            shownSince = shownSince or os.clock()
+            if os.clock() - shownSince >= 2 then
+                shownSince = nil
+                setMinimized(true)
+            end
+        else
+            shownSince = nil
+        end
+        task.wait(0.25)
+    end
+end)
 
 local isUIMaximized = false
 maximizeBtn.MouseButton1Click:Connect(function()
@@ -2589,6 +2694,7 @@ runMacroBtn.MouseButton1Click:Connect(function()
             end
         end
         if #waypoints == 0 and selectedMacroName ~= "" then loadMacroFromFile(selectedMacroName) end
+        if SETTINGS.AutoHideUI then UI.setMinimized(true) end
     else
         if humanoid then
             humanoid.AutoRotate = true
@@ -2640,6 +2746,12 @@ SETTINGS.TargetPartySize = cfg.TargetPartySize or 0
 if cfg.WaitForPlayers ~= nil then SETTINGS.WaitForPlayers = cfg.WaitForPlayers end
 if cfg.AutoDodgeEnabled ~= nil then SETTINGS.AutoDodgeEnabled = cfg.AutoDodgeEnabled end
 if cfg.BlackScreen ~= nil then SETTINGS.BlackScreen = cfg.BlackScreen end
+if cfg.AutoHideUI ~= nil then SETTINGS.AutoHideUI = cfg.AutoHideUI end
+if UI.autoHideRow then
+    UI.autoHideRow.Text = "Auto Hide UI: " .. (SETTINGS.AutoHideUI and "ON" or "OFF")
+    UI.autoHideRow.BackgroundColor3 = SETTINGS.AutoHideUI and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
+end
+if UI.refreshAutoHideBtns then UI.refreshAutoHideBtns() end
 if cfg.CustomName ~= nil then SETTINGS.CustomName = tostring(cfg.CustomName) end
 if cfg.RenameParty ~= nil then SETTINGS.RenameParty = cfg.RenameParty end
 SETTINGS.LogoAvatar = true -- icon is fixed; only the username can be changed
