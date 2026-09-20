@@ -115,6 +115,7 @@ local SETTINGS = {
     WaitForPlayers = true,
     AutoDodgeEnabled = true,
     BlackScreen = false,
+    ShowRangeCircle = false,
     AutoHideUI = false,
     CustomName = "",
     RenameParty = true,
@@ -790,6 +791,19 @@ local function buildStatusEmbed(clearTime, title, rewardData)
     local gems = findPlayerStat({"Gems", "gems", "Diamonds", "Gem"})
     if gems == nil then gems = findHudNumber({"gem", "diamond"}) end
 
+    -- map name of the dungeon you are in (the game keeps it in Workspace.dungeonName)
+    local mapName = "Lobby"
+    if not isInLobby() then
+        mapName = SETTINGS.LobbyMap
+        pcall(function()
+            local dObj = Workspace:FindFirstChild("dungeonName")
+            if dObj then
+                local v = dObj:IsA("ValueBase") and dObj.Value or dObj.Name
+                if tostring(v) ~= "" then mapName = tostring(v) end
+            end
+        end)
+    end
+
     local logo = "attachment://logo.png"
     local attach = true
     local embed = {
@@ -803,6 +817,8 @@ local function buildStatusEmbed(clearTime, title, rewardData)
             {["name"] = "🪙 Total Gold", ["value"] = safeField(displayCurrency(gold)), ["inline"] = true},
             {["name"] = "💎 Total Gems", ["value"] = safeField(displayCurrency(gems)), ["inline"] = true},
             {["name"] = "⏱️ Run Time: " .. tostring(clearTime), ["value"] = "⌛ **Time Left: " .. readTimeLeft() .. "**", ["inline"] = true},
+            {["name"] = "🗺️ Map Cleared", ["value"] = "**" .. safeField(mapName) .. "**", ["inline"] = true},
+            {["name"] = "🎒 Inventory", ["value"] = "**" .. tostring(getInventoryCount()) .. "/" .. tostring(MAX_INVENTORY_CAPACITY) .. "**", ["inline"] = true},
         },
         ["footer"] = { ["text"] = "NCL MACRO  •  Dungeon Quest Reborn" },
         ["timestamp"] = DateTime.now():ToIsoDate()
@@ -943,6 +959,7 @@ TargetPartySize = SETTINGS.TargetPartySize,
 WaitForPlayers = SETTINGS.WaitForPlayers,
 AutoDodgeEnabled = SETTINGS.AutoDodgeEnabled,
 BlackScreen = SETTINGS.BlackScreen,
+ShowRangeCircle = SETTINGS.ShowRangeCircle,
 AutoHideUI = SETTINGS.AutoHideUI,
 CustomName = SETTINGS.CustomName,
 RenameParty = SETTINGS.RenameParty,
@@ -1138,7 +1155,7 @@ local function applyBlackScreen(enabled, skipSave)
             gui.Name = "DungeonBlackScreen"
             gui.ResetOnSpawn = false
             gui.IgnoreGuiInset = true
-            gui.DisplayOrder = 5 -- below the main manager UI so it stays usable
+            gui.DisplayOrder = 100 -- above the game HUD (and the swapped NCL avatar icon), below the manager UI
             gui.Parent = UI.screenGui and UI.screenGui.Parent or player:WaitForChild("PlayerGui")
 
             local bg = Instance.new("Frame")
@@ -1205,6 +1222,7 @@ local function applyBlackScreen(enabled, skipSave)
                     "LEVEL " .. displayNumber(findPlayerStat({"Level", "level", "Lvl"}) or findHudNumber({"level", "lvl"})),
                     "GOLD " .. displayCurrency(findPlayerStat({"Gold", "gold", "Coins", "Money"}) or findHudNumber({"gold", "coin", "money"})),
                     "GEMS " .. displayCurrency(findPlayerStat({"Gems", "gems", "Diamonds", "Gem"}) or findHudNumber({"gem", "diamond"})),
+                    "STORAGE " .. tostring(getInventoryCount()) .. "/" .. tostring(MAX_INVENTORY_CAPACITY),
                     "PARTY " .. tostring(#Players:GetPlayers()),
                     string.format("TIME RUNNING %dm %ds", math.floor(elapsed / 60), math.floor(elapsed % 60)),
                     "TIME LEFT " .. readTimeLeft(),
@@ -1343,7 +1361,7 @@ end
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name = "NCL MACRO"
 screenGui.ResetOnSpawn = false
-screenGui.DisplayOrder = 10
+screenGui.DisplayOrder = 200
 UI.screenGui = screenGui
 
 local targetParent = player:WaitForChild("PlayerGui", 5)
@@ -1917,6 +1935,61 @@ UI.minDistInput = MakeSettingRow("Min Combat Dist (Run Away):", SETTINGS.MinDist
 UI.maxDistInput = MakeSettingRow("Max Combat Dist (Kite):", SETTINGS.MaxDistance, settingsPage)
 UI.atkReachInput = MakeSettingRow("Attack Reach (Max Fire Dist):", SETTINGS.AttackReach, settingsPage)
 
+-- RANGE CIRCLES: rings on the ground around you (red = Min run-away, yellow = Max kite, green = Attack reach)
+UI.rangeCircleRow = MakeButton("Show Range Circle: " .. (SETTINGS.ShowRangeCircle and "ON" or "OFF"), SETTINGS.ShowRangeCircle and Color3.fromRGB(40, 150, 70) or T.idle, settingsPage)
+UI.rangeCircleRow.MouseButton1Click:Connect(function()
+    SETTINGS.ShowRangeCircle = not SETTINGS.ShowRangeCircle
+    UI.rangeCircleRow.Text = "Show Range Circle: " .. (SETTINGS.ShowRangeCircle and "ON" or "OFF")
+    UI.rangeCircleRow.BackgroundColor3 = SETTINGS.ShowRangeCircle and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
+    saveConfig()
+end)
+
+local function destroyRangeRings()
+    if UI.rangeRings then
+        for _, ring in pairs(UI.rangeRings) do pcall(function() ring:Destroy() end) end
+        UI.rangeRings = nil
+    end
+end
+UI.destroyRangeRings = destroyRangeRings
+
+task.spawn(function()
+    local ringDefs = {
+        { key = "MinDistance", color = Color3.fromRGB(255, 70, 70) },
+        { key = "MaxDistance", color = Color3.fromRGB(255, 220, 60) },
+        { key = "AttackReach", color = Color3.fromRGB(70, 255, 130) },
+    }
+    while not isCleaningUp do
+        if SETTINGS.ShowRangeCircle and rootPart and rootPart.Parent and not isInLobby() then
+            if UI.rangeRings and UI.rangeRings[1] and UI.rangeRings[1].Adornee ~= rootPart then destroyRangeRings() end
+            if not UI.rangeRings then
+                UI.rangeRings = {}
+                for i, def in ipairs(ringDefs) do
+                    local ring = Instance.new("CylinderHandleAdornment")
+                    ring.Name = "NCLRangeRing"
+                    ring.Adornee = rootPart
+                    ring.Height = 0.2
+                    ring.Color3 = def.color
+                    ring.Transparency = 0.25
+                    ring.AlwaysOnTop = true
+                    ring.ZIndex = i
+                    ring.CFrame = CFrame.new(0, -2.9, 0) * CFrame.Angles(math.rad(90), 0, 0)
+                    ring.Parent = Workspace
+                    UI.rangeRings[i] = ring
+                end
+            end
+            for i, def in ipairs(ringDefs) do
+                local radius = math.max(tonumber(SETTINGS[def.key]) or 0, 1)
+                UI.rangeRings[i].Radius = radius
+                UI.rangeRings[i].InnerRadius = math.max(radius - 0.35, 0)
+            end
+        else
+            destroyRangeRings()
+        end
+        task.wait(0.2)
+    end
+    destroyRangeRings()
+end)
+
 UI.customTargetInput = MakeSettingRow("Bonus Target Name:", SETTINGS.CustomTargetName, settingsPage)
 UI.customTargetInput.PlaceholderText = "e.g. Elderbark Tree"
 
@@ -2347,7 +2420,7 @@ local function setMinimized(state)
             local dragKind
             local function moveTo(pointer)
                 local delta = pointer - dragStart
-                if delta.Magnitude > 4 then moved = true end
+                if delta.Magnitude > 4 then moved = true; UI.iconDragged = true end
                 if moved then
                     icon.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
                 end
@@ -2381,6 +2454,20 @@ local function setMinimized(state)
                 end
             end))
             UI.miniIcon = icon
+        end
+        -- park the icon just above the game's top timer (unless you dragged it somewhere yourself)
+        if not UI.iconDragged then
+            pcall(function()
+                local timeGui = player.PlayerGui:FindFirstChild("timeLeftGui")
+                local timer = timeGui and findNested(timeGui, "Frame", "time")
+                if timer and timer.AbsoluteSize.X > 0 then
+                    local inset = game:GetService("GuiService"):GetGuiInset()
+                    local iconSize = UI.miniIcon.AbsoluteSize.X
+                    local x = timer.AbsolutePosition.X + timer.AbsoluteSize.X / 2 - iconSize / 2
+                    local y = math.max(timer.AbsolutePosition.Y - inset.Y - iconSize - 6, 0)
+                    UI.miniIcon.Position = UDim2.new(0, x, 0, y)
+                end
+            end)
         end
         mainFrame.Visible = false
         UI.miniIcon.Visible = true
@@ -2750,6 +2837,11 @@ SETTINGS.TargetPartySize = cfg.TargetPartySize or 0
 if cfg.WaitForPlayers ~= nil then SETTINGS.WaitForPlayers = cfg.WaitForPlayers end
 if cfg.AutoDodgeEnabled ~= nil then SETTINGS.AutoDodgeEnabled = cfg.AutoDodgeEnabled end
 if cfg.BlackScreen ~= nil then SETTINGS.BlackScreen = cfg.BlackScreen end
+if cfg.ShowRangeCircle ~= nil then SETTINGS.ShowRangeCircle = cfg.ShowRangeCircle end
+if UI.rangeCircleRow then
+    UI.rangeCircleRow.Text = "Show Range Circle: " .. (SETTINGS.ShowRangeCircle and "ON" or "OFF")
+    UI.rangeCircleRow.BackgroundColor3 = SETTINGS.ShowRangeCircle and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
+end
 if cfg.AutoHideUI ~= nil then SETTINGS.AutoHideUI = cfg.AutoHideUI end
 if UI.autoHideRow then
     UI.autoHideRow.Text = "Auto Hide UI: " .. (SETTINGS.AutoHideUI and "ON" or "OFF")
@@ -2954,6 +3046,7 @@ if UI.hudLabels then
 end
 pcall(function() RunService:Set3dRenderingEnabled(true) end)
 if UI.blackGui then UI.blackGui:Destroy() end
+if UI.destroyRangeRings then UI.destroyRangeRings() end
 if UI.screenGui then UI.screenGui:Destroy() end
 if UI.keyGui then UI.keyGui:Destroy() end
 if rootPart and rootPart:FindFirstChild("FacingAlign") then rootPart.FacingAlign:Destroy() end
@@ -3170,7 +3263,8 @@ local function swapAvatar(target)
 end
 
 function UI.refreshAvatar()
-    if SETTINGS.LogoAvatar then
+    -- the black screen shows its own clean layout, so drop the HUD icon swap while it is on
+    if SETTINGS.LogoAvatar and not SETTINGS.BlackScreen then
         if not (UI.avatarHolder and UI.avatarHolder.Parent) then
             restoreAvatar()
             local target = findAvatarTarget()
@@ -3438,28 +3532,50 @@ end
 return hazards
 end
 
+-- Flat ground telegraphs (thin, lying horizontally) are measured on the ground plane only, so being a few studs
+-- above them (jumping, stairs, tall character) no longer hides the danger. Vertical reach is capped at 9 studs.
 local function getDistanceToHazard(localP, hazard)
-if hazard.shape == "Ball" then return localP.Magnitude - (math.min(hazard.size.X, hazard.size.Y, hazard.size.Z) / 2)
+local s, cf = hazard.size, hazard.cframe
+if hazard.shape == "Ball" then return localP.Magnitude - (math.min(s.X, s.Y, s.Z) / 2)
 elseif hazard.shape == "Cylinder" then
-return math.max(math.sqrt(localP.Y^2 + localP.Z^2) - (math.max(hazard.size.Y, hazard.size.Z) / 2), math.abs(localP.X) - (hazard.size.X / 2))
+local radial = math.sqrt(localP.Y^2 + localP.Z^2) - (math.max(s.Y, s.Z) / 2)
+local axial = math.abs(localP.X) - (s.X / 2)
+if s.X <= 3 and math.abs(cf.RightVector.Y) > 0.7 then -- flat disc: axis (local X) points up
+    if axial > 9 then return math.huge end
+    return radial
+end
+return math.max(radial, axial)
 else
-return math.max(math.abs(localP.X) - (hazard.size.X / 2), math.abs(localP.Y) - (hazard.size.Y / 2), math.abs(localP.Z) - (hazard.size.Z / 2))
+local ax, sz = { localP.X, localP.Y, localP.Z }, { s.X, s.Y, s.Z }
+local axes = { cf.RightVector, cf.UpVector, cf.LookVector }
+local thin = 1
+for i = 2, 3 do if sz[i] < sz[thin] then thin = i end end
+if sz[thin] <= 3 and math.abs(axes[thin].Y) > 0.7 then -- flat slab lying on the ground
+    if math.abs(ax[thin]) - sz[thin] / 2 > 9 then return math.huge end
+    local d = -math.huge
+    for i = 1, 3 do
+        if i ~= thin then d = math.max(d, math.abs(ax[i]) - sz[i] / 2) end
+    end
+    return d
+end
+return math.max(math.abs(ax[1]) - sz[1] / 2, math.abs(ax[2]) - sz[2] / 2, math.abs(ax[3]) - sz[3] / 2)
 end
 end
 
-local function isPointInDanger(point, hazards)
+local function isPointInDanger(point, hazards, margin)
+local buffer = SETTINGS.DodgeBuffer + (margin or 0)
 local minHazardDist = math.huge
 for _, hazard in ipairs(hazards) do
 local dEdge = getDistanceToHazard(hazard.cframe:PointToObjectSpace(point), hazard)
 if dEdge < minHazardDist then minHazardDist = dEdge end
-if dEdge <= SETTINGS.DodgeBuffer then return true, hazard.name, hazard, minHazardDist end
+if dEdge <= buffer then return true, hazard.name, hazard, minHazardDist end
 
     if hazard.velocity.Magnitude > 4 then
         for t = 0.15, 0.75, 0.2 do
             local futurePos = hazard.cframe.Position + (hazard.velocity * t)
             local fdEdge = getDistanceToHazard((hazard.cframe - hazard.cframe.Position + futurePos):PointToObjectSpace(point), hazard)
             if fdEdge < minHazardDist then minHazardDist = fdEdge end
-            if fdEdge <= (SETTINGS.DodgeBuffer * 2) then return true, hazard.name .. " (Incoming)", hazard, minHazardDist end
+            if fdEdge <= (buffer * 2) then return true, hazard.name .. " (Incoming)", hazard, minHazardDist end
         end
     end
 end
@@ -3516,6 +3632,77 @@ rootPart.CFrame = CFrame.new(destination, Vector3.new(lookTarget.X, destination.
 
 task.delay(0.1, function() isDodgeBlinking = false end)
 postDodgeHoldUntil = os.clock() + 0.35
+end
+
+-- SMARTER DODGING (kept on the UI table to stay under Luau's local limit)
+
+-- true when walking the straight line from fromPos to toPos would run through any of the given hazards
+function UI.isPathBlocked(fromPos, toPos, hazards, margin)
+    if #hazards == 0 then return false end
+    local delta = toPos - fromPos
+    local dist = delta.Magnitude
+    if dist < 0.5 then return false end
+    local steps = math.clamp(math.ceil(dist / 3), 1, 12)
+    for i = 1, steps do
+        if isPointInDanger(fromPos + delta * (i / steps), hazards, margin) then return true end
+    end
+    return false
+end
+
+-- Picks the best safe spot to dodge to. First pass wants a 2 stud extra safety margin and a route that does not
+-- cross other attack zones; if nothing qualifies it relaxes both, then falls back to the "least bad" spot.
+function UI.findDodgePoint(playerPos, enemyPos, hazards)
+    local idealCombatDist = (SETTINGS.MinDistance + SETTINGS.MaxDistance) * 0.5
+    local others = {} -- hazards we are NOT standing in (the route out of the current one is allowed to cross it)
+    for _, h in ipairs(hazards) do
+        if not isPointInDanger(playerPos, { h }, 0) then table.insert(others, h) end
+    end
+    local bestExit, bestExitClearance = nil, -math.huge
+    for pass = 1, 2 do
+        local margin = (pass == 1) and 2 or 0
+        local best, bestScore = nil, math.huge
+        for _, dist in ipairs({2, 3.5, 5, 7, 9, 12, 16, 20, 25, 30, 38}) do
+            for _, dir in ipairs(DODGE_DIRECTIONS) do
+                local candidate = playerPos + dir * dist
+                local inDanger, _, _, clearance = isPointInDanger(candidate, hazards, margin)
+                if not inDanger then
+                    local score = (dist <= 8 and -45 or 0) - math.min(clearance, 12) + dist * 0.35 + math.abs((candidate - enemyPos).Magnitude - idealCombatDist) * 0.04
+                    if score < bestScore and (pass == 2 or not UI.isPathBlocked(playerPos, candidate, others, 0)) and isValidTeleport(playerPos, candidate) then
+                        best, bestScore = candidate, score
+                    end
+                elseif pass == 1 and clearance > bestExitClearance then
+                    bestExit, bestExitClearance = candidate, clearance
+                end
+            end
+        end
+        if best then return best end
+    end
+    if bestExit and isValidTeleport(playerPos, bestExit) then return bestExit end
+    return nil
+end
+
+-- MoveTo that will not walk you into an attack zone: if the next ~14 studs of the route cross one it waits
+-- (max 1.5 s so a stuck/false-positive zone can never freeze the macro), otherwise it just moves.
+function UI.moveAvoiding(targetPos, hazards)
+    if #hazards > 0 and SETTINGS.AutoDodgeEnabled and SETTINGS.GameplayMode ~= "Ultra Carry Mode" and not hasSpawnShield() then
+        local pos = rootPart.Position
+        local toTarget = targetPos - pos
+        local lookDist = math.min(toTarget.Magnitude, 14)
+        if lookDist > 0.5 and UI.isPathBlocked(pos, pos + toTarget.Unit * lookDist, hazards, 0) then
+            local now = os.clock()
+            if not UI.moveHoldSince then UI.moveHoldSince = now end
+            if now - UI.moveHoldSince < 1.5 then
+                setStatus("Status: Holding - attack zone ahead")
+                humanoid:MoveTo(pos)
+                return
+            end
+        else
+            UI.moveHoldSince = nil
+        end
+    else
+        UI.moveHoldSince = nil
+    end
+    humanoid:MoveTo(targetPos)
 end
 
 -- 7. UNIFIED MAIN LOOP
@@ -3751,21 +3938,7 @@ end
 if currentlyInDanger or (activeDodgePoint and now < dodgeExpiration) then
     if not activeDodgePoint or now >= dodgeExpiration or isPointInDanger(activeDodgePoint, hazards) then
         local enemyPos = activeTarget and activeTarget:FindFirstChild("HumanoidRootPart") and activeTarget.HumanoidRootPart.Position or playerPos
-        local idealCombatDist = (SETTINGS.MinDistance + SETTINGS.MaxDistance) * 0.5
-        local bestCandidate, bestExitCandidate = nil, nil
-        local bestScore, bestExitClearance = math.huge, -math.huge
-
-        for _, dist in ipairs({2, 3.5, 5, 7, 9, 12, 16, 20, 25, 30, 38}) do
-            for _, dir in ipairs(DODGE_DIRECTIONS) do
-                local candidate = playerPos + dir * dist
-                local inDanger, _, _, clearance = isPointInDanger(candidate, hazards)
-                if not inDanger then
-                    local score = (dist <= 8 and -45 or 0) - math.min(clearance, 12) + dist * 0.35 + math.abs((candidate - enemyPos).Magnitude - idealCombatDist) * 0.04
-                    if score < bestScore and isValidTeleport(playerPos, candidate) then bestScore = score; bestCandidate = candidate end
-                elseif clearance > bestExitClearance then bestExitClearance = clearance; bestExitCandidate = candidate end
-            end
-        end
-        activeDodgePoint = bestCandidate or (bestExitCandidate and isValidTeleport(playerPos, bestExitCandidate) and bestExitCandidate)
+        activeDodgePoint = UI.findDodgePoint(playerPos, enemyPos, hazards)
         dodgeExpiration  = activeDodgePoint and (now + 0.9) or 0
     end
 
@@ -3824,7 +3997,7 @@ if #waypoints > 0 then
             if not activeTarget and alignOrient and alignOrient.Parent and alignOrient.Enabled then
                 alignOrient.CFrame = CFrame.lookAt(playerPos, Vector3.new(targetNode.X, playerPos.Y, targetNode.Z))
             end
-            humanoid:MoveTo(getGlidedTargetPos(playerPos, targetNode))
+            UI.moveAvoiding(getGlidedTargetPos(playerPos, targetNode), hazards)
             if flatNodeDist <= 3.8 then currentWaypointIndex = currentWaypointIndex + 1 end
             return
         end
@@ -3846,7 +4019,7 @@ if activeTarget and activeTarget:FindFirstChild("HumanoidRootPart") then
             -- Smoothly backpedal away from target if they get too close
             local retreatDir = (playerPos - enemyPos).Unit
             local retreatPos = playerPos + Vector3.new(retreatDir.X, 0, retreatDir.Z).Unit * 6
-            humanoid:MoveTo(getGlidedTargetPos(playerPos, retreatPos))
+            UI.moveAvoiding(getGlidedTargetPos(playerPos, retreatPos), hazards)
         else
             -- In combat zone: stand ground and cast cleanly
             humanoid:MoveTo(playerPos)
@@ -3859,7 +4032,7 @@ if activeTarget and activeTarget:FindFirstChild("HumanoidRootPart") then
         if hasLOS then
             table.clear(activePathWaypoints)
             pathIndex = 1
-            humanoid:MoveTo(getGlidedTargetPos(playerPos, enemyPos))
+            UI.moveAvoiding(getGlidedTargetPos(playerPos, enemyPos), hazards)
         else
             if now - lastPathComputeTime > 0.8 or #activePathWaypoints == 0 or pathIndex > #activePathWaypoints then
                 lastPathComputeTime = now
@@ -3887,7 +4060,7 @@ if activeTarget and activeTarget:FindFirstChild("HumanoidRootPart") then
 
                 if pathIndex <= #activePathWaypoints then
                     if targetWp.Action == Enum.PathWaypointAction.Jump then humanoid.Jump = true end
-                    humanoid:MoveTo(wpPos)
+                    UI.moveAvoiding(wpPos, hazards)
                 end
             end
         end
@@ -4362,7 +4535,7 @@ local function showKeySystem(onSuccess)
     end
 
     local gui = Instance.new("ScreenGui")
-    gui.Name = "NCL KEY"; gui.ResetOnSpawn = false; gui.DisplayOrder = 20
+    gui.Name = "NCL KEY"; gui.ResetOnSpawn = false; gui.DisplayOrder = 300
     local parent = player:WaitForChild("PlayerGui", 5)
     if gethui then pcall(function() parent = gethui() end) else pcall(function() local t = Instance.new("Folder"); t.Parent = CoreGui; t:Destroy(); parent = CoreGui end) end
     gui.Parent = parent
