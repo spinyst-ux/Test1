@@ -1172,14 +1172,6 @@ local function applyBlackScreen(enabled, skipSave)
             panel.BackgroundTransparency = 1
             panel.Parent = bg
 
-            local logoHolder = Instance.new("Frame")
-            logoHolder.AnchorPoint = Vector2.new(0.5, 0)
-            logoHolder.Position = UDim2.new(0.5, 0, 0, 0)
-            logoHolder.Size = UDim2.new(0, 110, 0, 110)
-            logoHolder.BackgroundTransparency = 1
-            logoHolder.Parent = panel
-            pcall(function() if UI.createLogoMark then UI.createLogoMark(logoHolder, 2) end end)
-
             local info = Instance.new("TextLabel")
             info.Position = UDim2.new(0, 0, 0, 130)
             info.Size = UDim2.new(1, 0, 0, 430)
@@ -1191,12 +1183,24 @@ local function applyBlackScreen(enabled, skipSave)
             info.Text = ""
             info.Parent = panel
 
+            local locationLabel = Instance.new("TextLabel")
+            locationLabel.AnchorPoint = Vector2.new(0.5, 0)
+            locationLabel.Position = UDim2.new(0.5, 0, 0, 10)
+            locationLabel.Size = UDim2.new(1, 0, 0, 100)
+            locationLabel.BackgroundTransparency = 1
+            locationLabel.Font = Enum.Font.GothamBlack
+            locationLabel.TextSize = 72
+            locationLabel.TextStrokeTransparency = 0.5
+            locationLabel.Parent = panel
+
             local function refreshInfo()
+                local inLobby = isInLobby()
+                locationLabel.Text = inLobby and "YOU ARE IN LOBBY" or "YOU ARE IN GAME"
+                locationLabel.TextColor3 = inLobby and Color3.fromRGB(255, 50, 50) or Color3.fromRGB(70, 140, 255)
                 local custom = tostring(SETTINGS.CustomName or ""):gsub("^%s+", ""):gsub("%s+$", "")
                 local elapsed = os.clock() - runStartTime
                 local lines = {
                     "NCL HUB",
-                    "DUNGEON QUEST REBORN",
                     player.Name:upper(),
                     "LEVEL " .. displayNumber(findPlayerStat({"Level", "level", "Lvl"}) or findHudNumber({"level", "lvl"})),
                     "GOLD " .. displayCurrency(findPlayerStat({"Gold", "gold", "Coins", "Money"}) or findHudNumber({"gold", "coin", "money"})),
