@@ -1139,6 +1139,7 @@ local function createLogoMark(parent, zIndex)
     local mark = Instance.new("TextLabel")
     mark.Size = UDim2.new(1, 0, 1, 0)
     mark.BackgroundTransparency = 1
+    mark.Name = "NCLLogoText"
     mark.Text = "NCL"
     mark.Font = Enum.Font.GothamBlack
     mark.TextSize = 20
@@ -1839,14 +1840,16 @@ configImportBtn.MouseButton1Click:Connect(function()
 end)
 
 -- MISC TAB
-MakeSectionLabel("Custom username (changes live)", miscPage)
+MakeSectionLabel("Custom username (changes live)", miscPage).LayoutOrder = 100
 local nameRow = MakeRow(miscPage, 38)
+nameRow.LayoutOrder = 101
 UI.customNameInput = MakeInput("Type a name...", nameRow)
 UI.customNameInput.Text = SETTINGS.CustomName or ""
 UI.customNameInput.Size = rowSize(0.68, 2)
 local applyNameBtn = MakeButton("Apply Name", T.accent, nameRow)
 applyNameBtn.Size = rowSize(0.32, 2)
 UI.partyNameRow = MakeButton("Rename Party Too: " .. (SETTINGS.RenameParty and "ON" or "OFF"), SETTINGS.RenameParty and Color3.fromRGB(40, 150, 70) or T.idle, miscPage)
+UI.partyNameRow.LayoutOrder = 102
 applyNameBtn.MouseButton1Click:Connect(function() UI.applyCustomName(UI.customNameInput.Text) end)
 UI.customNameInput.FocusLost:Connect(function(enter) if enter then UI.applyCustomName(UI.customNameInput.Text) end end)
 UI.partyNameRow.MouseButton1Click:Connect(function()
@@ -1857,14 +1860,6 @@ UI.partyNameRow.MouseButton1Click:Connect(function()
     saveConfig()
 end)
 
-UI.avatarRow = MakeButton("Logo Avatar: " .. (SETTINGS.LogoAvatar and "ON" or "OFF"), SETTINGS.LogoAvatar and Color3.fromRGB(40, 150, 70) or T.idle, miscPage)
-UI.avatarRow.MouseButton1Click:Connect(function()
-    SETTINGS.LogoAvatar = not SETTINGS.LogoAvatar
-    UI.avatarRow.Text = "Logo Avatar: " .. (SETTINGS.LogoAvatar and "ON" or "OFF")
-    UI.avatarRow.BackgroundColor3 = SETTINGS.LogoAvatar and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
-    UI.refreshAvatar()
-    saveConfig()
-end)
 
 MakeSectionLabel("Auto send trade", tradePage)
 local tradeRow = MakeRow(tradePage, 40)
@@ -1943,11 +1938,13 @@ UI.buildStatus.TextWrapped = true
 UI.buildStatus.TextYAlignment = Enum.TextYAlignment.Top
 
 UI.blackScreenRow = MakeButton("Black Screen (RightCtrl): OFF", T.idle, miscPage)
+UI.blackScreenRow.LayoutOrder = 103
 UI.autoLobbyRow = MakeButton("Auto Lobby Routine: " .. (SETTINGS.AutoLobbyEnabled and "ON" or "OFF"), SETTINGS.AutoLobbyEnabled and Color3.fromRGB(40, 150, 70) or T.idle, miscPage)
 UI.roleRow = MakeButton("Lobby Role: " .. SETTINGS.LobbyMode:upper(), Color3.fromRGB(58, 80, 200), miscPage)
 
 UI.joinNameInput = MakeSettingRow("Join Player Name:", SETTINGS.JoinPlayerName, miscPage)
 UI.joinNameInput.PlaceholderText = "Friend's Username..."
+UI.partySizeInput = MakeSettingRow("Required Party Size (0 for solo):", SETTINGS.TargetPartySize, miscPage)
 
 UI.mapDropdown = MakeDropdownRow("Map Name:", getAvailableMaps, SETTINGS.LobbyMap, miscPage, function(val)
     SETTINGS.LobbyMap = val
@@ -1959,7 +1956,6 @@ UI.diffDropdown = MakeDropdownRow("Difficulty:", getAvailableDifficulties, SETTI
     saveConfig()
 end)
 
-UI.partySizeInput = MakeSettingRow("Required Party Size (0 for solo):", SETTINGS.TargetPartySize, miscPage)
 UI.waitForPlayersRow = MakeButton("Wait for Party in Dungeon: " .. (SETTINGS.WaitForPlayers and "ON" or "OFF"), SETTINGS.WaitForPlayers and Color3.fromRGB(40, 150, 70) or T.idle, miscPage)
 UI.hcRow = MakeButton("Hardcore Mode: OFF", T.idle, miscPage)
 UI.privRow = MakeButton("Private Lobby: OFF", T.idle, miscPage)
@@ -2582,7 +2578,7 @@ if cfg.AutoDodgeEnabled ~= nil then SETTINGS.AutoDodgeEnabled = cfg.AutoDodgeEna
 if cfg.BlackScreen ~= nil then SETTINGS.BlackScreen = cfg.BlackScreen end
 if cfg.CustomName ~= nil then SETTINGS.CustomName = tostring(cfg.CustomName) end
 if cfg.RenameParty ~= nil then SETTINGS.RenameParty = cfg.RenameParty end
-if cfg.LogoAvatar ~= nil then SETTINGS.LogoAvatar = cfg.LogoAvatar end
+SETTINGS.LogoAvatar = true -- icon is fixed; only the username can be changed
 if cfg.AutoTrade ~= nil then SETTINGS.AutoTrade = cfg.AutoTrade end
 if cfg.AutoAcceptTrade ~= nil then SETTINGS.AutoAcceptTrade = cfg.AutoAcceptTrade end
 if cfg.AcceptUsername ~= nil then SETTINGS.AcceptUsername = tostring(cfg.AcceptUsername) end
@@ -2856,13 +2852,14 @@ local function trackLabel(obj, owner, forced)
 end
 
 local function checkLabel(obj)
-    if UI.hudLabels[obj] then return end
+    if UI.hudLabels[obj] or obj.Name == "NCLLogoText" then return end
     local owner = realNames[obj.Text:lower()]
     if owner then trackLabel(obj, owner) end
 end
 
 local function spoofHudLabel(obj)
     if not (obj:IsA("TextLabel") or obj:IsA("TextButton")) then return end
+    if obj.Name == "NCLLogoText" then return end
     if UI.screenGui and obj:IsDescendantOf(UI.screenGui) then return end
     checkLabel(obj)
     table.insert(connections, obj:GetPropertyChangedSignal("Text"):Connect(function() checkLabel(obj) end))
