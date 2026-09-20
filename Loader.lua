@@ -117,6 +117,10 @@ local SETTINGS = {
     CustomName = "",
     RenameParty = true,
     LogoAvatar = true,
+    AutoTrade = false,
+    AutoAcceptTrade = false,
+    AcceptUsername = "",
+    TradeUsername = "",
     GameplayMode = "No TP Auto Play",
     ReplayOnDisconnect = false,
     RejoinOnDisconnect = false,
@@ -657,7 +661,8 @@ local function buildItemsText(rewardData)
     local itemsList = {}
     if type(rewardData) == "table" and type(rewardData.items) == "table" then
         for _, item in ipairs(rewardData.items) do
-            if type(item) == "table" and not ({ gold = true, gem = true, gems = true })[tostring(item.itemName or ""):lower()] then
+            local lname = type(item) == "table" and tostring(item.itemName or item.name or ""):lower() or ""
+            if type(item) == "table" and not lname:find("gem", 1, true) and not lname:find("gold", 1, true) then
                 local name = tostring(item.itemName or "Unknown Item")
                 local rarity = item.rarity and ("[" .. tostring(item.rarity):upper() .. "]") or ""
                 local tier = item.tier and ("(" .. tostring(item.tier) .. ")") or ""
@@ -669,18 +674,51 @@ local function buildItemsText(rewardData)
     return #itemsList > 0 and table.concat(itemsList, "\n") or "None"
 end
 
+local function toAmount(v)
+    if type(v) == "number" then return v end
+    if type(v) == "string" then
+        local n = tonumber((v:gsub(",", "")))
+        if n then return n end
+        return tonumber(v:match("([%d,%.]+)") and (v:match("([%d,%.]+)"):gsub(",", "")))
+    end
+    return nil
+end
+
+-- amount of an item entry: numeric fields first, then a number inside its name ("3,230 Gems", "x50 Gems")
+local function itemAmount(item)
+    for _, k in ipairs({ "amount", "quantity", "count", "value", "qty", "number", "total", "gems", "gem", "gold" }) do
+        local n = toAmount(item[k])
+        if n then return n end
+    end
+    local n = toAmount(tostring(item.itemName or item.name or ""):match("[%d,%.]+"))
+    return n or 1
+end
+
 local function extractGains(rewardData)
-    local gold = tonumber(rewardData.gold)
-    local gems = tonumber(rewardData.gems) or tonumber(rewardData.gem)
-    if type(rewardData.items) == "table" then
-        for _, item in ipairs(rewardData.items) do
-            if type(item) == "table" then
-                local name = tostring(item.itemName or ""):lower()
-                local amount = tonumber(item.amount) or tonumber(item.quantity) or tonumber(item.count) or tonumber(item.value) or 1
-                if name == "gold" and gold == nil then gold = amount end
-                if (name == "gems" or name == "gem") and gems == nil then gems = amount end
+    local gold, gems
+    -- top-level fields: any numeric key containing "gold" / "gem"
+    for k, v in pairs(rewardData) do
+        if type(k) == "string" then
+            local lk, n = k:lower(), toAmount(v)
+            if n then
+                if lk:find("gem", 1, true) and gems == nil then gems = n end
+                if lk:find("gold", 1, true) and gold == nil then gold = n end
             end
         end
+    end
+    -- item entries named gold / gems
+    if type(rewardData.items) == "table" then
+        for _, item in pairs(rewardData.items) do
+            if type(item) == "table" then
+                local name = tostring(item.itemName or item.name or item.itemType or ""):lower()
+                if name:find("gem", 1, true) then gems = (gems or 0) + itemAmount(item)
+                elseif name:find("gold", 1, true) then gold = (gold or 0) + itemAmount(item) end
+            end
+        end
+    end
+    -- console dump so the real reward layout can be checked if this still shows 0
+    if gems == nil then
+        pcall(function() warn("[Webhook] no gems found in reward data: " .. HttpService:JSONEncode(rewardData)) end)
     end
     return gold or 0, gems or 0
 end
@@ -844,6 +882,10 @@ BlackScreen = SETTINGS.BlackScreen,
 CustomName = SETTINGS.CustomName,
 RenameParty = SETTINGS.RenameParty,
 LogoAvatar = SETTINGS.LogoAvatar,
+AutoTrade = SETTINGS.AutoTrade,
+AutoAcceptTrade = SETTINGS.AutoAcceptTrade,
+AcceptUsername = SETTINGS.AcceptUsername,
+TradeUsername = SETTINGS.TradeUsername,
 GameplayMode = SETTINGS.GameplayMode,
 ReplayOnDisconnect = SETTINGS.ReplayOnDisconnect,
 RejoinOnDisconnect = SETTINGS.RejoinOnDisconnect,
@@ -1083,27 +1125,41 @@ local function createLogoMark(parent, zIndex)
         return img
     end
 
+    -- dark rounded square with a blue -> purple -> pink "NCL"
+    local box = Instance.new("Frame")
+    box.Size = UDim2.new(1, 0, 1, 0)
+    box.BackgroundColor3 = Color3.fromRGB(10, 14, 26)
+    box.BorderSizePixel = 0
+    box.ZIndex = zIndex or 1
+    box.Parent = parent
+    local boxCorner = Instance.new("UICorner")
+    boxCorner.CornerRadius = UDim.new(0.24, 0)
+    boxCorner.Parent = box
+
     local mark = Instance.new("TextLabel")
     mark.Size = UDim2.new(1, 0, 1, 0)
     mark.BackgroundTransparency = 1
-    mark.RichText = true
-    mark.Text = "<i>N</i>"
+    mark.Text = "NCL"
     mark.Font = Enum.Font.GothamBlack
-    mark.TextSize = 40
-    mark.ZIndex = zIndex or 1
+    mark.TextSize = 20
+    mark.ZIndex = (zIndex or 1) + 1
     mark.TextColor3 = Color3.fromRGB(255, 255, 255)
-    mark.Parent = parent
+    mark.Parent = box
     local function fitText()
-        local h = mark.AbsoluteSize.Y
-        if h > 0 then mark.TextSize = math.clamp(math.floor(h * 0.95), 8, 100) end
+        local h = box.AbsoluteSize.Y
+        if h > 0 then mark.TextSize = math.clamp(math.floor(h * 0.36), 6, 60) end
     end
-    mark:GetPropertyChangedSignal("AbsoluteSize"):Connect(fitText)
+    box:GetPropertyChangedSignal("AbsoluteSize"):Connect(fitText)
     fitText()
     local gradient = Instance.new("UIGradient")
-    gradient.Color = ColorSequence.new(Color3.fromRGB(56, 140, 255), Color3.fromRGB(160, 78, 245))
-    gradient.Rotation = 55
+    gradient.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(64, 132, 255)),
+        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(160, 90, 245)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(240, 70, 145)),
+    })
+    gradient.Rotation = 0
     gradient.Parent = mark
-    return mark
+    return box
 end
 -- 4. INTERFACE INITIALIZATION
 
@@ -1549,6 +1605,8 @@ local macroPage = createPage("Macro", "Manage your macro settings and configurat
 local webhookPage = createPage("Webhook", "Send a summary to Discord after every match.")
 local sellPage = createPage("Auto Sell", "Choose which rarities get sold automatically.")
 local settingsPage = createPage("Setting", "Combat, movement and timing options.")
+local tradePage = createPage("Auto Trade", "Send and accept trades automatically.")
+local buildPage = createPage("Build", "Instantly spend all your free skill points.")
 local miscPage = createPage("Misc", "Lobby routine, gameplay mode and extras.")
 
 -- TABS
@@ -1588,7 +1646,7 @@ end
 
 local function createTab(text, page)
     local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(0.2, -4, 1, 0)
+    btn.Size = UDim2.new(1/7, -4, 1, 0)
     btn.BackgroundColor3 = T.accent
     btn.BackgroundTransparency = 1
     btn.Text = text
@@ -1596,6 +1654,7 @@ local function createTab(text, page)
     btn.Font = Enum.Font.GothamBold
     btn.TextSize = 13
     btn.BorderSizePixel = 0
+    btn.TextSize = 12
     btn.Parent = tabBar
     round(btn, 9)
     local bar = Instance.new("Frame")
@@ -1615,6 +1674,8 @@ createTab("Macro", macroPage)
 createTab("Webhook", webhookPage)
 createTab("Auto Sell", sellPage)
 createTab("Setting", settingsPage)
+createTab("Auto Trade", tradePage)
+createTab("Build", buildPage)
 createTab("Misc", miscPage)
 
 -- MACRO TAB
@@ -1804,6 +1865,82 @@ UI.avatarRow.MouseButton1Click:Connect(function()
     UI.refreshAvatar()
     saveConfig()
 end)
+
+MakeSectionLabel("Auto send trade", tradePage)
+local tradeRow = MakeRow(tradePage, 96)
+UI.tradeNameInput = MakeInput("Usernames (commas, spaces or new lines - no limit)...", tradeRow)
+UI.tradeNameInput.MultiLine = true
+UI.tradeNameInput.TextWrapped = true
+UI.tradeNameInput.TextYAlignment = Enum.TextYAlignment.Top
+UI.tradeNameInput.ClipsDescendants = true
+UI.tradeNameInput.Text = SETTINGS.TradeUsername or ""
+UI.tradeNameInput.Size = rowSize(0.68, 2)
+local tradeNowBtn = MakeButton("Send Now", T.accent, tradeRow)
+tradeNowBtn.Size = rowSize(0.32, 2)
+UI.autoTradeRow = MakeButton("Auto Send Trade: " .. (SETTINGS.AutoTrade and "ON" or "OFF"), SETTINGS.AutoTrade and Color3.fromRGB(40, 150, 70) or T.idle, tradePage)
+UI.tradeStatus = makeText(tradePage, "Trade: idle", 12, T.muted, Enum.Font.Gotham)
+UI.tradeStatus.Size = UDim2.new(1, 0, 0, 30)
+UI.tradeStatus.TextWrapped = true
+UI.tradeStatus.TextYAlignment = Enum.TextYAlignment.Top
+UI.tradeNameInput.FocusLost:Connect(function()
+    if isCleaningUp then return end
+    SETTINGS.TradeUsername = UI.tradeNameInput.Text:match("^%s*(.-)%s*$")
+    saveConfig()
+end)
+tradeNowBtn.MouseButton1Click:Connect(function()
+    SETTINGS.TradeUsername = UI.tradeNameInput.Text:match("^%s*(.-)%s*$")
+    saveConfig()
+    task.spawn(function() UI.tradeStatus.Text = "Trade: " .. tostring(UI.sendTradeNow()) end)
+end)
+UI.autoTradeRow.MouseButton1Click:Connect(function()
+    SETTINGS.AutoTrade = not SETTINGS.AutoTrade
+    SETTINGS.TradeUsername = UI.tradeNameInput.Text:match("^%s*(.-)%s*$")
+    UI.autoTradeRow.Text = "Auto Send Trade: " .. (SETTINGS.AutoTrade and "ON" or "OFF")
+    UI.autoTradeRow.BackgroundColor3 = SETTINGS.AutoTrade and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
+    saveConfig()
+end)
+
+MakeSectionLabel("Auto accept trade (only these users)", tradePage)
+UI.acceptNameInput = MakeInput("Usernames to accept (commas, spaces or new lines)...", tradePage)
+UI.acceptNameInput.Size = UDim2.new(1, 0, 0, 72)
+UI.acceptNameInput.MultiLine = true
+UI.acceptNameInput.TextWrapped = true
+UI.acceptNameInput.TextYAlignment = Enum.TextYAlignment.Top
+UI.acceptNameInput.ClipsDescendants = true
+UI.acceptNameInput.Text = SETTINGS.AcceptUsername or ""
+UI.acceptNameInput.FocusLost:Connect(function()
+    if isCleaningUp then return end
+    SETTINGS.AcceptUsername = UI.acceptNameInput.Text:match("^%s*(.-)%s*$")
+    saveConfig()
+end)
+UI.autoAcceptRow = MakeButton("Auto Accept Trade: " .. (SETTINGS.AutoAcceptTrade and "ON" or "OFF"), SETTINGS.AutoAcceptTrade and Color3.fromRGB(40, 150, 70) or T.idle, tradePage)
+UI.acceptStatus = makeText(tradePage, "Accept: waiting for a trade request", 12, T.muted, Enum.Font.Gotham)
+UI.acceptStatus.Size = UDim2.new(1, 0, 0, 30)
+UI.acceptStatus.TextWrapped = true
+UI.acceptStatus.TextYAlignment = Enum.TextYAlignment.Top
+UI.autoAcceptRow.MouseButton1Click:Connect(function()
+    SETTINGS.AutoAcceptTrade = not SETTINGS.AutoAcceptTrade
+    UI.autoAcceptRow.Text = "Auto Accept Trade: " .. (SETTINGS.AutoAcceptTrade and "ON" or "OFF")
+    UI.autoAcceptRow.BackgroundColor3 = SETTINGS.AutoAcceptTrade and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
+    saveConfig()
+end)
+
+MakeSectionLabel("Instant build (open the Skills tab once first)", buildPage)
+for _, b in ipairs({
+    { "Warrior Build  -  all Physical Power", Color3.fromRGB(190, 60, 70), "Physical Power", "Warrior Build" },
+    { "Mage Build  -  all Spell Power", Color3.fromRGB(120, 70, 210), "Spell Power", "Mage Build" },
+    { "Guardian Build  -  all Stamina", Color3.fromRGB(40, 150, 90), "Stamina", "Guardian Build" },
+}) do
+    local buildBtn = MakeButton(b[1], b[2], buildPage)
+    buildBtn.MouseButton1Click:Connect(function() UI.applyBuild(b[3], b[4]) end)
+end
+MakeSectionLabel("Reset stats (refunds all spent points)", buildPage)
+local resetBtn = MakeButton("Reset Stats", Color3.fromRGB(200, 90, 60), buildPage)
+resetBtn.MouseButton1Click:Connect(function() UI.resetStats() end)
+UI.buildStatus = makeText(buildPage, "Build: idle", 12, T.muted, Enum.Font.Gotham)
+UI.buildStatus.Size = UDim2.new(1, 0, 0, 30)
+UI.buildStatus.TextWrapped = true
+UI.buildStatus.TextYAlignment = Enum.TextYAlignment.Top
 
 UI.blackScreenRow = MakeButton("Black Screen (RightCtrl): OFF", T.idle, miscPage)
 UI.autoLobbyRow = MakeButton("Auto Lobby Routine: " .. (SETTINGS.AutoLobbyEnabled and "ON" or "OFF"), SETTINGS.AutoLobbyEnabled and Color3.fromRGB(40, 150, 70) or T.idle, miscPage)
@@ -2056,9 +2193,68 @@ end)
 local isUIMinimized = false
 local function setMinimized(state)
     isUIMinimized = state
-    body.Visible = not state
     macroScroll.Visible = false
-    mainFrame.Size = UDim2.new(0, WINDOW_W, 0, state and 80 or WINDOW_H)
+    if state then
+        if not UI.miniIcon then
+            local icon = Instance.new("TextButton")
+            icon.Name = "NCLMiniIcon"
+            icon.Size = UDim2.new(0, 84, 0, 84)
+            icon.Position = UDim2.new(0.71, -96, 0, 68) -- default: just left of the top timer
+            icon.BackgroundTransparency = 1
+            icon.Text = ""
+            icon.AutoButtonColor = false
+            icon.Visible = false
+            icon.Parent = screenGui
+            createLogoMark(icon, 2)
+            -- custom drag (mouse + touch): drag anywhere to move, a plain click restores the window
+            local dragging, moved, dragStart, startPos = false, false, nil, nil
+            local function isPointer(input)
+                return input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
+            end
+            local dragKind
+            local function moveTo(pointer)
+                local delta = pointer - dragStart
+                if delta.Magnitude > 4 then moved = true end
+                if moved then
+                    icon.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+                end
+            end
+            icon.InputBegan:Connect(function(input)
+                if isPointer(input) then
+                    dragging, moved, dragKind = true, false, input.UserInputType
+                    if dragKind == Enum.UserInputType.Touch then
+                        dragStart = Vector2.new(input.Position.X, input.Position.Y)
+                    else
+                        dragStart = UserInputService:GetMouseLocation()
+                    end
+                    startPos = icon.Position
+                end
+            end)
+            -- mouse: follow the cursor every frame; touch: follow the finger
+            table.insert(connections, RunService.RenderStepped:Connect(function()
+                if dragging and dragKind == Enum.UserInputType.MouseButton1 then
+                    moveTo(UserInputService:GetMouseLocation())
+                end
+            end))
+            table.insert(connections, UserInputService.InputChanged:Connect(function(input)
+                if dragging and dragKind == Enum.UserInputType.Touch and input.UserInputType == Enum.UserInputType.Touch then
+                    moveTo(Vector2.new(input.Position.X, input.Position.Y))
+                end
+            end))
+            table.insert(connections, UserInputService.InputEnded:Connect(function(input)
+                if dragging and isPointer(input) then
+                    dragging = false
+                    if not moved then setMinimized(false) end
+                end
+            end))
+            UI.miniIcon = icon
+        end
+        mainFrame.Visible = false
+        UI.miniIcon.Visible = true
+    else
+        if UI.miniIcon then UI.miniIcon.Visible = false end
+        mainFrame.Visible = true
+    end
 end
 minimizeBtn.MouseButton1Click:Connect(function() setMinimized(not isUIMinimized) end)
 
@@ -2387,6 +2583,10 @@ if cfg.BlackScreen ~= nil then SETTINGS.BlackScreen = cfg.BlackScreen end
 if cfg.CustomName ~= nil then SETTINGS.CustomName = tostring(cfg.CustomName) end
 if cfg.RenameParty ~= nil then SETTINGS.RenameParty = cfg.RenameParty end
 if cfg.LogoAvatar ~= nil then SETTINGS.LogoAvatar = cfg.LogoAvatar end
+if cfg.AutoTrade ~= nil then SETTINGS.AutoTrade = cfg.AutoTrade end
+if cfg.AutoAcceptTrade ~= nil then SETTINGS.AutoAcceptTrade = cfg.AutoAcceptTrade end
+if cfg.AcceptUsername ~= nil then SETTINGS.AcceptUsername = tostring(cfg.AcceptUsername) end
+if cfg.TradeUsername ~= nil then SETTINGS.TradeUsername = tostring(cfg.TradeUsername) end
 SETTINGS.AutoSellEnabled = cfg.AutoSellEnabled or false
 
 if cfg.GameplayMode then SETTINGS.GameplayMode = cfg.GameplayMode end
@@ -2479,6 +2679,16 @@ if UI.avatarRow then
     UI.avatarRow.BackgroundColor3 = SETTINGS.LogoAvatar and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
 end
 if UI.refreshNames then UI.refreshNames() end
+if UI.tradeNameInput then UI.tradeNameInput.Text = SETTINGS.TradeUsername or "" end
+if UI.acceptNameInput then UI.acceptNameInput.Text = SETTINGS.AcceptUsername or "" end
+if UI.autoAcceptRow then
+    UI.autoAcceptRow.Text = "Auto Accept Trade: " .. (SETTINGS.AutoAcceptTrade and "ON" or "OFF")
+    UI.autoAcceptRow.BackgroundColor3 = SETTINGS.AutoAcceptTrade and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
+end
+if UI.autoTradeRow then
+    UI.autoTradeRow.Text = "Auto Send Trade: " .. (SETTINGS.AutoTrade and "ON" or "OFF")
+    UI.autoTradeRow.BackgroundColor3 = SETTINGS.AutoTrade and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
+end
 
 if UI.eifToggleBtn then
     UI.eifToggleBtn.Text = "EIF Spammer: " .. (SETTINGS.EIFSpammerEnabled and "ON" or "OFF")
@@ -2568,6 +2778,7 @@ end
 pcall(function() RunService:Set3dRenderingEnabled(true) end)
 if UI.blackGui then UI.blackGui:Destroy() end
 if UI.screenGui then UI.screenGui:Destroy() end
+if UI.keyGui then UI.keyGui:Destroy() end
 if rootPart and rootPart:FindFirstChild("FacingAlign") then rootPart.FacingAlign:Destroy() end
 if rootPart and rootPart:FindFirstChild("FacingAttachment") then rootPart.FacingAttachment:Destroy() end
 
@@ -2831,6 +3042,7 @@ alignOrient.Attachment0 = attachment
 alignOrient.Responsiveness = 200
 alignOrient.MaxTorque = math.huge
 alignOrient.RigidityEnabled = true
+alignOrient.CFrame = rootPart.CFrame
 alignOrient.Enabled = shouldAlign
 alignOrient.Parent = rootPart
 
@@ -3146,6 +3358,9 @@ local mainConnection = RunService.Heartbeat:Connect(function(deltaTime)
 if not isAutoplay then return end
 
 if isInLobby() then
+    -- release the facing lock in the lobby so the player can turn freely
+    if alignOrient and alignOrient.Enabled then alignOrient.Enabled = false end
+    if humanoid and not humanoid.AutoRotate then humanoid.AutoRotate = true end
     handleLobbyAutomation()
     return 
 end
@@ -3155,8 +3370,7 @@ if SETTINGS.GameplayMode == "Manual Play" then
     if humanoid.AutoRotate == false then humanoid.AutoRotate = true end
     if alignOrient and alignOrient.Enabled then alignOrient.Enabled = false end
 else
-    if humanoid.AutoRotate == true then humanoid.AutoRotate = false end
-    if alignOrient and not alignOrient.Enabled then alignOrient.Enabled = true end
+    -- facing lock is only applied while an enemy is targeted (see aim lock below)
 end
 
 local now = os.clock()
@@ -3228,12 +3442,17 @@ if activeTarget and activeTarget:FindFirstChild("HumanoidRootPart") then
     local toEnemy = enemyPos - playerPos
     local flatToEnemy = Vector3.new(toEnemy.X, 0, toEnemy.Z)
 
-    if SETTINGS.GameplayMode ~= "Manual Play" and alignOrient and alignOrient.Parent and alignOrient.Enabled then
+    if SETTINGS.GameplayMode ~= "Manual Play" and alignOrient and alignOrient.Parent then
+        if not alignOrient.Enabled then alignOrient.CFrame = rootPart.CFrame; alignOrient.Enabled = true end
+        if humanoid.AutoRotate then humanoid.AutoRotate = false end
         if flatToEnemy.Magnitude > 0.1 then
             alignOrient.CFrame = CFrame.lookAt(playerPos, Vector3.new(enemyPos.X, playerPos.Y, enemyPos.Z))
         end
     end
 else
+    -- no target: hold the current facing instead of a stale/default direction
+    if alignOrient and alignOrient.Enabled then alignOrient.Enabled = false end
+    if not humanoid.AutoRotate then humanoid.AutoRotate = true end
     if (now - lastEnemySeenTime) >= SETTINGS.NoEnemyDelay then
         setStatus("Status: No enemies found! Replaying...")
         lastEnemySeenTime = now + 9999 
@@ -3497,5 +3716,623 @@ table.insert(connections, mainConnection)
 
 -- RUN INITIALIZATION
 
-buildInterface()
-loadConfigAndAutoExecute()
+-- AUTO TRADE: sends a trade request to the chosen username every 1 s while the toggle is ON.
+-- The game's trade remote is discovered by name (anything called *trade* that looks like a "send/request" remote).
+local function findTradeRemotes()
+    local found = {}
+    for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
+        if (obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction")) and obj.Name:lower():find("trade", 1, true) then
+            table.insert(found, obj)
+        end
+    end
+    return found
+end
+
+local function pickTradeRemote(list)
+    local best, bestScore
+    for _, r in ipairs(list) do
+        local n, s = r.Name:lower(), 0
+        for _, kw in ipairs({ "send", "request", "invite", "start", "create", "initiate" }) do if n:find(kw, 1, true) then s = s + 1 end end
+        for _, kw in ipairs({ "accept", "decline", "cancel", "confirm", "ready", "add", "remove", "update", "finish", "complete", "show" }) do if n:find(kw, 1, true) then s = s - 2 end end
+        if not bestScore or s > bestScore then best, bestScore = r, s end
+    end
+    if bestScore and bestScore > 0 then return best end
+    return nil
+end
+
+local function findPlayerByName(query)
+    query = tostring(query or ""):lower()
+    if query == "" then return nil end
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= player and (p.Name:lower() == query or p.DisplayName:lower() == query) then return p end
+    end
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= player and (p.Name:lower():sub(1, #query) == query or p.DisplayName:lower():sub(1, #query) == query) then return p end
+    end
+    return nil
+end
+
+function UI.sendTradeNow(rotate)
+    -- one or many usernames, separated by commas, semicolons, spaces or new lines
+    local names = {}
+    for name in tostring(SETTINGS.TradeUsername or ""):gmatch("[^,;%s]+") do table.insert(names, name) end
+    if #names == 0 then return "type a username first" end
+
+    local targets, missing = {}, {}
+    for _, name in ipairs(names) do
+        local p = findPlayerByName(name)
+        if p then table.insert(targets, p) else table.insert(missing, name) end
+    end
+    if #targets == 0 then return "not in this server: " .. table.concat(missing, ", ") end
+
+    -- auto mode: the game keeps only ONE outgoing request, so each new request cancels the previous one.
+    -- Stay on one player for 6 sends (~6 s) so they can accept, then move to the next.
+    if rotate then
+        UI.tradeTick = (UI.tradeTick or 0) + 1
+        targets = { targets[math.floor((UI.tradeTick - 1) / 4) % #targets + 1] }
+    end
+
+    local list = findTradeRemotes()
+    local remote = pickTradeRemote(list)
+    if not remote then
+        local names = {}
+        for _, r in ipairs(list) do table.insert(names, r:GetFullName() .. " (" .. r.ClassName .. ")") end
+        pcall(warn, "[Trade] no send-trade remote found. Trade-related remotes: " .. (#names > 0 and table.concat(names, ", ") or "none"))
+        return "no trade remote found (see console)"
+    end
+    local sent = {}
+    for _, target in ipairs(targets) do
+        safeInvoke(remote, target)
+        table.insert(sent, target.Name)
+    end
+    local msg = "sent to " .. #sent .. ": " .. table.concat(sent, ", ") .. " via " .. remote.Name
+    if #missing > 0 then msg = msg .. " (not in server: " .. table.concat(missing, ", ") .. ")" end
+    return msg
+end
+
+function UI.startAutoTrade()
+    task.spawn(function()
+        local lastSent = 0
+        while not isCleaningUp do
+            if SETTINGS.AutoTrade and SETTINGS.TradeUsername ~= "" and os.clock() - lastSent >= 0.5 then
+                lastSent = os.clock()
+                local ok, msg = pcall(UI.sendTradeNow, true)
+                if UI.tradeStatus and UI.tradeStatus.Parent then
+                    UI.tradeStatus.Text = "Trade: " .. tostring(ok and msg or ("error - " .. tostring(msg)))
+                end
+            end
+            task.wait(0.1)
+        end
+    end)
+end
+
+-- finds the on-screen "Accept" button of the trade-request popup and presses it.
+-- Returns (clicked, message). Tries the button's own handlers, then a real mouse click, and checks the popup closed.
+function UI.clickAcceptButton()
+    local pGui = player:FindFirstChild("PlayerGui")
+    if not pGui then return false, "no PlayerGui" end
+    local function shown(obj)
+        local cur = obj
+        while cur and cur ~= pGui do
+            if cur:IsA("GuiObject") and not cur.Visible then return false end
+            if cur:IsA("ScreenGui") and not cur.Enabled then return false end
+            cur = cur.Parent
+        end
+        return obj.AbsoluteSize.X > 0 and obj.AbsoluteSize.Y > 0
+    end
+    local function findBtn()
+        for _, obj in ipairs(pGui:GetDescendants()) do
+            if (obj:IsA("TextButton") or obj:IsA("TextLabel")) and obj.Text:lower():match("^%s*accept%s*$")
+                and not (UI.screenGui and obj:IsDescendantOf(UI.screenGui)) and shown(obj) then
+                return obj
+            end
+        end
+    end
+    local btn
+    for _ = 1, 20 do
+        btn = findBtn()
+        if btn then break end
+        task.wait(0.1)
+    end
+    if not btn then return false, "Accept button not found" end
+    pcall(warn, "[Trade] Accept button: " .. btn:GetFullName() .. " (" .. btn.ClassName .. ")")
+
+    -- 1) fire the button's own handlers (on it and on its parents, in case a wrapper button owns the click)
+    local target = btn
+    for _ = 1, 3 do
+        if target and target:IsA("GuiButton") then
+            pcall(function()
+                if getconnections then
+                    for _, sig in ipairs({ target.MouseButton1Click, target.Activated, target.MouseButton1Down, target.MouseButton1Up }) do
+                        for _, c in ipairs(getconnections(sig)) do c:Fire() end
+                    end
+                elseif firesignal then
+                    firesignal(target.MouseButton1Click)
+                    firesignal(target.Activated)
+                end
+            end)
+        end
+        target = target and target.Parent
+    end
+    task.wait(0.4)
+    if not shown(btn) then return true, "accepted" end
+
+    -- 2) real mouse click at the button's centre (the game may listen to raw input)
+    local ok = pcall(function()
+        local gui = btn:FindFirstAncestorOfClass("ScreenGui")
+        local inset = (gui and gui.IgnoreGuiInset) and Vector2.zero or game:GetService("GuiService"):GetGuiInset()
+        local pos = btn.AbsolutePosition + btn.AbsoluteSize / 2 + inset
+        VirtualInputManager:SendMouseMoveEvent(pos.X, pos.Y, game)
+        task.wait(0.05)
+        VirtualInputManager:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 0)
+        task.wait(0.06)
+        VirtualInputManager:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
+    end)
+    task.wait(0.4)
+    if not shown(btn) then return true, "accepted" end
+    return false, ok and "clicked Accept but the popup is still open" or "could not click Accept"
+end
+-- AUTO ACCEPT TRADE: listens to the game's incoming-trade remote(s) and answers "accept" (same pattern as the join-request hook).
+function UI.startAutoAccept()
+    task.spawn(function()
+        local function setAccept(text)
+            if UI.acceptStatus and UI.acceptStatus.Parent then UI.acceptStatus.Text = "Accept: " .. text end
+        end
+        local list = findTradeRemotes()
+        local respond
+        for _, r in ipairs(list) do
+            local n = r.Name:lower()
+            if n:find("respond", 1, true) or n:find("accept", 1, true) then
+                if not respond or n:find("respond", 1, true) then respond = r end
+            end
+        end
+        local names = {}
+        for _, r in ipairs(list) do table.insert(names, r.Name .. " (" .. r.ClassName .. ")") end
+        pcall(warn, "[Trade] trade remotes: " .. (#names > 0 and table.concat(names, ", ") or "none"))
+        for _, r in ipairs(list) do
+            local n = r.Name:lower()
+            if r:IsA("RemoteEvent") and (n:find("show", 1, true) or n:find("incoming", 1, true) or n:find("receive", 1, true) or n:find("prompt", 1, true) or n:find("request", 1, true)) and not n:find("send", 1, true) then
+                table.insert(connections, r.OnClientEvent:Connect(function(...)
+                    if not SETTINGS.AutoAcceptTrade or isCleaningUp then return end
+                    local args = {...}
+                    -- only accept requests from listed users (any string / Player argument may carry the name)
+                    local allowed, who = {}, nil
+                    for n in tostring(SETTINGS.AcceptUsername or ""):gmatch("[^,;%s]+") do allowed[n:lower()] = true end
+                    for _, a in ipairs(args) do
+                        local nm = (typeof(a) == "Instance" and a:IsA("Player")) and a.Name or (type(a) == "string" and a or nil)
+                        if nm and allowed[nm:lower()] then who = nm; break end
+                        if typeof(a) == "Instance" and a:IsA("Player") and allowed[a.DisplayName:lower()] then who = a.Name; break end
+                    end
+                    if not who then
+                        setAccept("ignored request (not in accept list)")
+                        return
+                    end
+                    pcall(warn, "[Trade] incoming via " .. r.Name .. ": " .. tostring(args[1]) .. ", " .. tostring(args[2]))
+                    task.wait(0.3)
+                    local clicked, info = UI.clickAcceptButton()
+                    if clicked then
+                        setAccept(info .. " request from " .. who)
+                    elseif respond then
+                        safeInvoke(respond, args[1], true)
+                        setAccept(tostring(info) .. " - also sent accept remote for " .. who)
+                    else
+                        setAccept(tostring(info) .. " (no respond remote found)")
+                    end
+                end))
+            end
+        end
+        if #list == 0 then setAccept("no trade remotes found") end
+    end)
+end
+
+-- BUILD: puts every free skill point into one stat by pressing that stat's "+" button in the Skills panel
+local function readSkillPoints(pGui)
+    for _, obj in ipairs(pGui:GetDescendants()) do
+        if obj:IsA("TextLabel") then
+            local n = obj.Text:match("^%s*[Pp]oints:?%s*([%d,]+)")
+            if n then return tonumber((n:gsub(",", ""))) end
+        end
+    end
+    return nil
+end
+
+local function isPlusGlyph(s)
+    s = tostring(s or ""):gsub("%s", "")
+    return s == "+" or s == "＋" or s == "✚" or s == "➕"
+end
+
+local function isGreenColor(c)
+    return c.G > 0.55 and c.G > c.R + 0.2 and c.G > c.B + 0.2
+end
+
+local function findStatButton(pGui, statName)
+    local want = statName:lower()
+    local bestBtn, bestDist
+    local foundLabel = false
+    local seen = {}
+    for _, label in ipairs(pGui:GetDescendants()) do
+        if (label:IsA("TextLabel") or label:IsA("TextButton")) and label.Text:lower():match("^%s*(.-)%s*$") == want
+            and not (UI.screenGui and label:IsDescendantOf(UI.screenGui)) then
+            foundLabel = true
+            local screen = label:FindFirstAncestorOfClass("ScreenGui")
+            local lp, ls = label.AbsolutePosition, label.AbsoluteSize
+            local lc = lp + ls / 2
+            for _, d in ipairs(screen and screen:GetDescendants() or {}) do
+                if d ~= label and d:IsA("GuiButton") then
+                    local text = d:IsA("TextButton") and d.Text:match("^%s*(.-)%s*$") or ""
+                    local childPlus = false
+                    for _, c in ipairs(d:GetDescendants()) do
+                        if c:IsA("TextLabel") and isPlusGlyph(c.Text) then childPlus = true break end
+                    end
+                    local isPlus = isPlusGlyph(text) or childPlus
+                    local sz = d.AbsoluteSize
+                    local greenBtn = (d.BackgroundTransparency < 1 and isGreenColor(d.BackgroundColor3)) or (d:IsA("ImageButton") and isGreenColor(d.ImageColor3))
+                    local squareish = greenBtn and text == "" and sz.X > 8 and sz.Y > 8 and sz.X < 110 and sz.Y < 110 and sz.X / sz.Y > 0.6 and sz.X / sz.Y < 1.6
+                    if isPlus or squareish then
+                        local bc = d.AbsolutePosition + sz / 2
+                        -- the + sits below the stat title and within its width
+                        if bc.Y >= lc.Y - 5 and bc.Y <= lc.Y + 220 and bc.X >= lp.X - 10 and bc.X <= lp.X + ls.X + 30 then
+                            local dist = (bc - lc).Magnitude - (isPlus and 40 or 0)
+                            if not bestDist or dist < bestDist then bestBtn, bestDist = d, dist end
+                        end
+                        table.insert(seen, string.format("%s '%s' (%d,%d) %dx%d %s", d.ClassName, d.Name, bc.X, bc.Y, sz.X, sz.Y, greenBtn and "green" or "not-green"))
+                    end
+                end
+            end
+        end
+    end
+    if bestBtn then
+        pcall(warn, "[Build] " .. statName .. " + button: " .. bestBtn:GetFullName())
+        return bestBtn
+    end
+    if #seen > 0 then pcall(warn, "[Build] buttons near '" .. statName .. "': " .. table.concat(seen, " | ")) end
+    return nil, foundLabel and ("found '" .. statName .. "' but no + button next to it (see console)") or ("could not find the '" .. statName .. "' row - open the Skills tab once")
+end
+local function pressGuiButton(btn)
+    local fired = false
+    pcall(function()
+        if getconnections then
+            for _, sig in ipairs({ btn.MouseButton1Click, btn.Activated }) do
+                for _, c in ipairs(getconnections(sig)) do c:Fire(); fired = true end
+            end
+        elseif firesignal then
+            firesignal(btn.MouseButton1Click); fired = true
+        end
+    end)
+    return fired
+end
+
+local function realClickButton(btn)
+    pcall(function()
+        local gui = btn:FindFirstAncestorOfClass("ScreenGui")
+        local inset = (gui and gui.IgnoreGuiInset) and Vector2.zero or game:GetService("GuiService"):GetGuiInset()
+        local pos = btn.AbsolutePosition + btn.AbsoluteSize / 2 + inset
+        VirtualInputManager:SendMouseMoveEvent(pos.X, pos.Y, game)
+        task.wait(0.03)
+        VirtualInputManager:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 0)
+        task.wait(0.04)
+        VirtualInputManager:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
+    end)
+end
+
+function UI.applyBuild(statName, buildName)
+    if UI.buildBusy then return end
+    UI.buildBusy = true
+    local function say(text)
+        if UI.buildStatus and UI.buildStatus.Parent then UI.buildStatus.Text = "Build: " .. text end
+    end
+    task.spawn(function()
+        local ok, err = pcall(function()
+            local pGui = player:FindFirstChild("PlayerGui")
+            local btn, why = findStatButton(pGui, statName)
+            if not btn then say(why); return end
+            local points = readSkillPoints(pGui)
+            if not points then say("could not read the Points label - open the Skills tab once"); return end
+            if points <= 0 then say("no free points to spend"); return end
+            local startPoints, last, stall, triedReal = points, points, 0, false
+            while points > 0 and not isCleaningUp do
+                for _ = 1, 10 do
+                    pressGuiButton(btn)
+                    task.wait(0.03)
+                end
+                task.wait(0.15)
+                points = readSkillPoints(pGui) or points
+                if points >= last then stall = stall + 1 else stall = 0 end
+                last = points
+                if stall == 2 and not triedReal then triedReal = true; realClickButton(btn) end
+                if stall >= 4 then break end
+                say(string.format("%s - %d points left...", buildName, points))
+            end
+            if points <= 0 then
+                say(string.format("%s done - spent %d points on %s", buildName, startPoints, statName))
+            else
+                say(string.format("stopped with %d points left - the + button did not respond (open the Skills tab and retry)", points))
+                local names = {}
+                for _, r in ipairs(ReplicatedStorage:GetDescendants()) do
+                    local n = r.Name:lower()
+                    if (r:IsA("RemoteEvent") or r:IsA("RemoteFunction")) and (n:find("stat", 1, true) or n:find("skill", 1, true) or n:find("point", 1, true)) then
+                        table.insert(names, r:GetFullName())
+                    end
+                end
+                pcall(warn, "[Build] stat-related remotes: " .. (#names > 0 and table.concat(names, ", ") or "none"))
+            end
+        end)
+        if not ok then say("error - " .. tostring(err)) end
+        UI.buildBusy = false
+    end)
+end
+
+-- RESET: presses the red "Reset" button of the Skills panel (the one in the same window as the Points label)
+function UI.resetStats()
+    if UI.buildBusy then return end
+    UI.buildBusy = true
+    local function say(text)
+        if UI.buildStatus and UI.buildStatus.Parent then UI.buildStatus.Text = "Build: " .. text end
+    end
+    task.spawn(function()
+        local ok, err = pcall(function()
+            local pGui = player:FindFirstChild("PlayerGui")
+            local pointsLabel
+            for _, obj in ipairs(pGui:GetDescendants()) do
+                if obj:IsA("TextLabel") and obj.Text:match("^%s*[Pp]oints:?%s*[%d,]+") then pointsLabel = obj break end
+            end
+            if not pointsLabel then say("could not find the Points label - open the Skills tab once"); return end
+            local screen = pointsLabel:FindFirstAncestorOfClass("ScreenGui")
+            local before = readSkillPoints(pGui) or 0
+            local pc = pointsLabel.AbsolutePosition + pointsLabel.AbsoluteSize / 2
+            local btn, bestDist
+            for _, d in ipairs(screen:GetDescendants()) do
+                if d:IsA("GuiButton") then
+                    local text = d:IsA("TextButton") and d.Text or ""
+                    if text == "" then
+                        for _, c in ipairs(d:GetDescendants()) do
+                            if c:IsA("TextLabel") then text = c.Text break end
+                        end
+                    end
+                    if text:lower():match("^%s*reset%s*$") then
+                        local dist = (d.AbsolutePosition + d.AbsoluteSize / 2 - pc).Magnitude
+                        if not bestDist or dist < bestDist then btn, bestDist = d, dist end
+                    end
+                end
+            end
+            if not btn then say("could not find the Reset button next to Points"); return end
+            pcall(warn, "[Build] Reset button: " .. btn:GetFullName())
+            pressGuiButton(btn)
+            task.wait(0.7)
+            local after = readSkillPoints(pGui) or before
+            if after <= before then
+                realClickButton(btn)
+                task.wait(0.7)
+                after = readSkillPoints(pGui) or before
+            end
+            if after > before then
+                say(string.format("stats reset - %d free points now (was %d)", after, before))
+            else
+                say("pressed Reset but the points did not change (the game may ask for confirmation)")
+            end
+        end)
+        if not ok then say("error - " .. tostring(err)) end
+        UI.buildBusy = false
+    end)
+end
+
+-- 8. KEY SYSTEM: the menu only builds after a valid key is entered (a saved valid key skips the prompt)
+local KEY = {
+    Required = true,
+    Keys = { "NCLHUB" },                        -- valid keys: edit / add your own
+    Url = "",                                   -- optional: link to a text file with one key per line (overrides Keys)
+    Discord = "https://discord.gg/sGJ3brqcJu",  -- copied to the clipboard by the Join Discord button
+    File = FOLDER_NAME .. "/key.txt",
+}
+
+local function keyIsValid(input)
+    input = tostring(input or ""):match("^%s*(.-)%s*$")
+    if input == "" then return false, "Enter a key first" end
+    local list = KEY.Keys
+    if KEY.Url ~= "" then
+        local body
+        local req = getHttpRequest()
+        if req then
+            local ok, res = pcall(req, { Url = KEY.Url, Method = "GET" })
+            if ok and type(res) == "table" then body = res.Body or res.body end
+        end
+        if type(body) ~= "string" then
+            local ok, res = pcall(function() return game:HttpGet(KEY.Url) end)
+            if ok then body = res end
+        end
+        if type(body) ~= "string" then return false, "Could not reach the key server" end
+        list = {}
+        for line in body:gmatch("[^\r\n]+") do table.insert(list, (line:match("^%s*(.-)%s*$"))) end
+    end
+    for _, k in ipairs(list) do
+        if k == input then return true end
+    end
+    return false, "Invalid key"
+end
+
+local function showKeySystem(onSuccess)
+    if not KEY.Required then onSuccess(); return end
+
+    local saved
+    pcall(function() if isfile and isfile(KEY.File) then saved = readfile(KEY.File) end end)
+    if saved and keyIsValid(saved) then onSuccess(); return end
+
+    local C = {
+        bg = Color3.fromRGB(9, 12, 24), panel = Color3.fromRGB(13, 17, 33), field = Color3.fromRGB(10, 13, 26),
+        stroke = Color3.fromRGB(38, 46, 96), text = Color3.fromRGB(232, 236, 255), muted = Color3.fromRGB(128, 138, 172),
+        purple = Color3.fromRGB(110, 80, 245), blue = Color3.fromRGB(50, 110, 255),
+        green = Color3.fromRGB(28, 220, 150), red = Color3.fromRGB(240, 70, 100),
+    }
+    local function corner(inst, r) local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r); c.Parent = inst end
+    local function outline(inst, color, t) local s = Instance.new("UIStroke"); s.Color = color or C.stroke; s.Thickness = t or 1; s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border; s.Parent = inst; return s end
+    local function box(parent, x, y, w, h, color)
+        local f = Instance.new("Frame")
+        f.Position = UDim2.new(0, x, 0, y); f.Size = UDim2.new(0, w, 0, h)
+        f.BackgroundColor3 = color; f.BorderSizePixel = 0; f.Parent = parent
+        return f
+    end
+    local function label(parent, text, size, color, font, x, y, w, h)
+        local l = Instance.new("TextLabel")
+        l.BackgroundTransparency = 1; l.Text = text; l.TextSize = size; l.TextColor3 = color
+        l.Font = font; l.TextXAlignment = Enum.TextXAlignment.Left; l.TextYAlignment = Enum.TextYAlignment.Center
+        l.Position = UDim2.new(0, x, 0, y); l.Size = UDim2.new(0, w, 0, h); l.Parent = parent
+        return l
+    end
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "NCL KEY"; gui.ResetOnSpawn = false; gui.DisplayOrder = 20
+    local parent = player:WaitForChild("PlayerGui", 5)
+    if gethui then pcall(function() parent = gethui() end) else pcall(function() local t = Instance.new("Folder"); t.Parent = CoreGui; t:Destroy(); parent = CoreGui end) end
+    gui.Parent = parent
+    UI.keyGui = gui
+
+    local win = box(gui, 0, 0, 720, 340, C.bg)
+    win.AnchorPoint = Vector2.new(0.5, 0.5); win.Position = UDim2.new(0.5, 0, 0.5, 0)
+    win.Active = true; win.Draggable = true; win.ClipsDescendants = true
+    corner(win, 14); outline(win, Color3.fromRGB(70, 80, 210), 1)
+    local scale = Instance.new("UIScale")
+    local cam = Workspace.CurrentCamera
+    local vp = cam and cam.ViewportSize or Vector2.new(1280, 720)
+    local baseScale = math.clamp(math.min(vp.X / 800, vp.Y / 420), 0.5, 1)
+    scale.Scale = baseScale; scale.Parent = win
+
+    -- header
+    local header = box(win, 14, 11, 692, 66, C.panel); corner(header, 12); outline(header)
+    local keyIcon = label(header, "🔑", 30, C.purple, Enum.Font.GothamBold, 16, 0, 44, 66)
+    local title = label(header, '<font color="#FFFFFF">Key</font> <font color="#7C6BFF">System</font>', 28, C.text, Enum.Font.GothamBlack, 66, 6, 300, 34)
+    title.RichText = true
+    label(header, "Enter your key to continue", 13, C.muted, Enum.Font.Gotham, 66, 38, 300, 20)
+
+    local function winBtn(x)
+        local b = Instance.new("TextButton")
+        b.Position = UDim2.new(0, x, 0, 18); b.Size = UDim2.new(0, 30, 0, 30)
+        b.BackgroundColor3 = C.field; b.BorderSizePixel = 0; b.Text = ""; b.Parent = header
+        corner(b, 8); outline(b)
+        return b
+    end
+    local function bar(parent, w, h, rot)
+        local f = box(parent, 0, 0, w, h, C.text)
+        f.AnchorPoint = Vector2.new(0.5, 0.5); f.Position = UDim2.new(0.5, 0, 0.5, 0); f.Rotation = rot or 0
+    end
+    local minBtn, maxBtn, closeBtn = winBtn(574), winBtn(610), winBtn(646)
+    bar(minBtn, 12, 2)
+    local maxIcon = box(maxBtn, 0, 0, 11, 11, C.text); maxIcon.AnchorPoint = Vector2.new(0.5, 0.5); maxIcon.Position = UDim2.new(0.5, 0, 0.5, 0)
+    maxIcon.BackgroundTransparency = 1; outline(maxIcon, C.text, 2)
+    bar(closeBtn, 15, 2, 45); bar(closeBtn, 15, 2, -45)
+
+    local body = box(win, 0, 0, 720, 340, C.bg); body.BackgroundTransparency = 1
+
+    -- left panel: key input, validate button, status card
+    local left = box(body, 16, 91, 480, 231, C.panel); corner(left, 12); outline(left)
+    local input = Instance.new("TextBox")
+    input.Position = UDim2.new(0, 16, 0, 20); input.Size = UDim2.new(0, 448, 0, 44)
+    input.BackgroundColor3 = C.field; input.BorderSizePixel = 0; input.ClearTextOnFocus = false
+    input.PlaceholderText = "Enter your key..."; input.PlaceholderColor3 = C.muted; input.Text = ""
+    input.TextColor3 = C.text; input.Font = Enum.Font.Gotham; input.TextSize = 15
+    input.TextXAlignment = Enum.TextXAlignment.Left; input.Parent = left
+    corner(input, 10); outline(input)
+    local inPad = Instance.new("UIPadding"); inPad.PaddingLeft = UDim.new(0, 48); inPad.PaddingRight = UDim.new(0, 12); inPad.Parent = input
+    label(input, "🔑", 16, C.purple, Enum.Font.GothamBold, -34, 0, 24, 44)
+
+    local validate = Instance.new("TextButton")
+    validate.Position = UDim2.new(0, 16, 0, 80); validate.Size = UDim2.new(0, 448, 0, 42)
+    validate.BackgroundColor3 = Color3.fromRGB(255, 255, 255); validate.BorderSizePixel = 0
+    validate.Text = "Validate Key"; validate.TextColor3 = Color3.fromRGB(255, 255, 255)
+    validate.Font = Enum.Font.GothamBold; validate.TextSize = 16; validate.AutoButtonColor = true; validate.Parent = left
+    corner(validate, 10)
+    local vGrad = Instance.new("UIGradient"); vGrad.Color = ColorSequence.new(C.purple, C.blue); vGrad.Parent = validate
+
+    local card = box(left, 16, 136, 448, 72, C.field); corner(card, 10); outline(card)
+    local spinner = box(card, 16, 14, 44, 44, C.field); spinner.BackgroundTransparency = 1; corner(spinner, 22)
+    local ring = outline(spinner, C.purple, 4)
+    local ringGrad = Instance.new("UIGradient")
+    ringGrad.Color = ColorSequence.new(C.purple, C.blue)
+    ringGrad.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(0.6, 0.1), NumberSequenceKeypoint.new(0.61, 0.85), NumberSequenceKeypoint.new(1, 0.85) })
+    ringGrad.Parent = ring
+    local statusIcon = label(card, "🔑", 26, C.purple, Enum.Font.GothamBold, 22, 0, 40, 72)
+    local statusTitle = label(card, "Ready", 17, C.text, Enum.Font.GothamBold, 76, 12, 350, 26)
+    local statusSub = label(card, "Type your key above, then press Validate.", 13, C.muted, Enum.Font.Gotham, 76, 38, 350, 20)
+    spinner.Visible = false
+
+    -- right panel: discord
+    local right = box(body, 507, 91, 197, 231, C.panel); corner(right, 12); outline(right)
+    label(right, "💬", 26, C.purple, Enum.Font.GothamBold, 16, 16, 34, 34)
+    label(right, "Discord Server", 16, C.text, Enum.Font.GothamBold, 56, 16, 130, 34)
+    local desc = label(right, "Join our Discord for support and updates.", 13, C.muted, Enum.Font.Gotham, 16, 62, 168, 40)
+    desc.TextWrapped = true; desc.TextYAlignment = Enum.TextYAlignment.Top
+    local discordBtn = Instance.new("TextButton")
+    discordBtn.Position = UDim2.new(0, 16, 0, 112); discordBtn.Size = UDim2.new(0, 165, 0, 40)
+    discordBtn.BackgroundColor3 = Color3.fromRGB(34, 40, 110); discordBtn.BorderSizePixel = 0
+    discordBtn.Text = "Join Discord"; discordBtn.TextColor3 = C.text; discordBtn.Font = Enum.Font.GothamSemibold
+    discordBtn.TextSize = 14; discordBtn.Parent = right
+    corner(discordBtn, 10); outline(discordBtn, Color3.fromRGB(60, 70, 190))
+
+    -- behaviour
+    local busy, closed = false, false
+    local spinConn = RunService.RenderStepped:Connect(function(dt)
+        if spinner.Visible then ringGrad.Rotation = (ringGrad.Rotation + dt * 300) % 360 end
+    end)
+    table.insert(connections, spinConn)
+
+    local function setState(kind, head, sub)
+        spinner.Visible = (kind == "busy")
+        statusIcon.Visible = (kind ~= "busy")
+        if kind == "ok" then statusIcon.Text = "✓"; statusIcon.TextColor3 = C.green
+        elseif kind == "bad" then statusIcon.Text = "✕"; statusIcon.TextColor3 = C.red
+        else statusIcon.Text = "🔑"; statusIcon.TextColor3 = C.purple end
+        statusTitle.Text = head; statusSub.Text = sub
+    end
+
+    local function submit()
+        if busy or closed then return end
+        busy = true
+        setState("busy", "Validating key...", "Please wait a moment.")
+        task.spawn(function()
+            task.wait(0.5)
+            local ok, err = keyIsValid(input.Text)
+            if closed then return end
+            if ok then
+                pcall(function()
+                    if writefile then writefile(KEY.File, (input.Text:match("^%s*(.-)%s*$"))) end
+                end)
+                setState("ok", "Key valid!", "Loading menu...")
+                task.wait(0.6)
+                closed = true
+                spinConn:Disconnect()
+                gui:Destroy()
+                UI.keyGui = nil
+                onSuccess()
+            else
+                setState("bad", err or "Invalid key", "Check your key and try again.")
+                busy = false
+            end
+        end)
+    end
+    validate.MouseButton1Click:Connect(submit)
+    input.FocusLost:Connect(function(enter) if enter then submit() end end)
+
+    discordBtn.MouseButton1Click:Connect(function()
+        setClipboard(KEY.Discord)
+        discordBtn.Text = "Invite copied!"
+        task.delay(2, function() if discordBtn.Parent then discordBtn.Text = "Join Discord" end end)
+    end)
+
+    local minimized, maximized = false, false
+    minBtn.MouseButton1Click:Connect(function()
+        minimized = not minimized
+        body.Visible = not minimized
+        win.Size = UDim2.new(0, 720, 0, minimized and 90 or 340)
+    end)
+    maxBtn.MouseButton1Click:Connect(function()
+        maximized = not maximized
+        scale.Scale = maximized and math.min(baseScale * 1.25, 1.4) or baseScale
+    end)
+    closeBtn.MouseButton1Click:Connect(function() closed = true; cleanup() end)
+end
+
+showKeySystem(function()
+    buildInterface()
+    loadConfigAndAutoExecute()
+    UI.startAutoTrade()
+    UI.startAutoAccept()
+end)
