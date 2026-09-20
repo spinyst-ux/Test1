@@ -95,6 +95,7 @@ local SETTINGS = {
     WallRayLength = 5.5,
     NoEnemyDelay = 10,
     Webhook = "",
+    WebhookLogo = "",
     IgnoreKeywords = "ring1, ring2, ring3, ring4, ring5, ring6",
     AutoSellEnabled = false,
     AutoSellConfig = {
@@ -528,6 +529,31 @@ local function cleanWebhookUrl(raw)
     return url
 end
 
+-- NCL logo (128x128 PNG, base64) uploaded with every webhook message
+local NCL_LOGO_B64 = "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"
+local ncLogoBytes
+local function getLogoBytes()
+    if ncLogoBytes then return ncLogoBytes end
+    local chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    local lookup = {}
+    for i = 1, #chars do lookup[chars:sub(i, i)] = i - 1 end
+    local out, bits, nbits = {}, 0, 0
+    for i = 1, #NCL_LOGO_B64 do
+        local v = lookup[NCL_LOGO_B64:sub(i, i)]
+        if v then
+            bits = bits * 64 + v
+            nbits = nbits + 6
+            if nbits >= 8 then
+                nbits = nbits - 8
+                local byte = math.floor(bits / (2 ^ nbits))
+                out[#out + 1] = string.char(byte)
+                bits = bits - byte * (2 ^ nbits)
+            end
+        end
+    end
+    ncLogoBytes = table.concat(out)
+    return ncLogoBytes
+end
 -- Posts a JSON payload to the webhook and reports the result (status bar, Webhook tab and console).
 local function postWebhook(url, payload, label)
     local function report(msg)
@@ -543,8 +569,23 @@ local function postWebhook(url, payload, label)
     local requestFn = getHttpRequest()
     if not requestFn then report("Your executor has no HTTP request function (request / http_request / syn.request)."); return end
 
+    local attachData
+    if payload._attachLogo then
+        payload._attachLogo = nil
+        pcall(function() attachData = getLogoBytes() end)
+    end
     local okEncode, body = pcall(function() return HttpService:JSONEncode(payload) end)
     if not okEncode then report("Could not build the message: " .. tostring(body)); return end
+
+    -- with a local logo file the message is sent as multipart so the image can be referenced as attachment://logo.png
+    local contentType = "application/json"
+    if attachData then
+        local boundary = "----NCL" .. HttpService:GenerateGUID(false):gsub("-", "")
+        body = "--" .. boundary .. "\r\nContent-Disposition: form-data; name=\"payload_json\"\r\nContent-Type: application/json\r\n\r\n" .. body
+            .. "\r\n--" .. boundary .. "\r\nContent-Disposition: form-data; name=\"files[0]\"; filename=\"logo.png\"\r\nContent-Type: image/png\r\n\r\n" .. attachData
+            .. "\r\n--" .. boundary .. "--\r\n"
+        contentType = "multipart/form-data; boundary=" .. boundary
+    end
 
     report("Sending...")
     task.spawn(function()
@@ -552,7 +593,7 @@ local function postWebhook(url, payload, label)
             Url = url,
             Method = "POST",
             Headers = {
-                ["Content-Type"] = "application/json",
+                ["Content-Type"] = contentType,
                 ["User-Agent"] = "Mozilla/5.0",
             },
             Body = body,
@@ -696,32 +737,49 @@ end
 
 local function extractGains(rewardData)
     local gold, gems
-    -- top-level fields: any numeric key containing "gold" / "gem"
-    for k, v in pairs(rewardData) do
-        if type(k) == "string" then
-            local lk, n = k:lower(), toAmount(v)
-            if n then
-                if lk:find("gem", 1, true) and gems == nil then gems = n end
-                if lk:find("gold", 1, true) and gold == nil then gold = n end
+    -- 1) numeric fields whose key contains "gold" / "gem", searched through nested tables too (first hit wins, no double counting)
+    local function scan(tbl, depth)
+        if depth > 4 then return end
+        for k, v in pairs(tbl) do
+            if type(v) == "table" then
+                if k ~= "items" then scan(v, depth + 1) end
+            elseif type(k) == "string" then
+                local lk, n = k:lower(), toAmount(v)
+                if n then
+                    if lk:find("gem", 1, true) and gems == nil then gems = n end
+                    if lk:find("gold", 1, true) and gold == nil then gold = n end
+                end
             end
         end
     end
-    -- item entries named gold / gems
+    scan(rewardData, 0)
+    -- 2) item entries named gold / gems, only when the fields above did not have it
     if type(rewardData.items) == "table" then
+        local itemGold, itemGems
         for _, item in pairs(rewardData.items) do
             if type(item) == "table" then
                 local name = tostring(item.itemName or item.name or item.itemType or ""):lower()
-                if name:find("gem", 1, true) then gems = (gems or 0) + itemAmount(item)
-                elseif name:find("gold", 1, true) then gold = (gold or 0) + itemAmount(item) end
+                if name:find("gem", 1, true) then itemGems = (itemGems or 0) + itemAmount(item)
+                elseif name:find("gold", 1, true) then itemGold = (itemGold or 0) + itemAmount(item) end
             end
         end
+        if gems == nil then gems = itemGems end
+        if gold == nil then gold = itemGold end
     end
+    -- 3) gems still unknown: use how much your total Gems changed since the last reward
+    local cur = findPlayerStat({"Gems", "gems", "Diamonds", "Gem"})
+    -- the real change in your Gems stat is the most reliable amount, so it wins over field guesses
+    if type(cur) == "number" and type(UI.lastGems) == "number" and cur > UI.lastGems then
+        gems = cur - UI.lastGems
+    end
+    if type(cur) == "number" then UI.lastGems = cur end
     -- console dump so the real reward layout can be checked if this still shows 0
     if gems == nil then
         pcall(function() warn("[Webhook] no gems found in reward data: " .. HttpService:JSONEncode(rewardData)) end)
     end
     return gold or 0, gems or 0
 end
+pcall(function() local g = findPlayerStat({"Gems", "gems", "Diamonds", "Gem"}); if type(g) == "number" then UI.lastGems = g end end)
 
 local function buildStatusEmbed(clearTime, title, rewardData)
     local level = findPlayerStat({"Level", "level", "Lvl"})
@@ -731,39 +789,39 @@ local function buildStatusEmbed(clearTime, title, rewardData)
     local gems = findPlayerStat({"Gems", "gems", "Diamonds", "Gem"})
     if gems == nil then gems = findHudNumber({"gem", "diamond"}) end
 
-    local lines = {
-        "**Username :** ||" .. player.Name .. "||", -- spoiler: hidden until clicked in Discord
-        "**Level :** " .. displayNumber(level),
-        "",
-        "**Total Gold :** " .. displayCurrency(gold),
-        "**Total Gems :** " .. displayCurrency(gems),
-        "",
-        "**Time :** " .. tostring(clearTime),
-        "**Time Left :** " .. readTimeLeft(),
-        "**Total Party :** " .. tostring(#Players:GetPlayers()),
-    }
-
+    local logo = "attachment://logo.png"
+    local attach = true
     local embed = {
-        ["title"] = title or "Dungeon Quest Reborn",
-        ["description"] = safeField(table.concat(lines, "\n")),
+        ["author"] = { ["name"] = "NCL MACRO  •  Auto Farm Report" },
+        ["title"] = "⚔️ " .. (title or "Dungeon Quest Reborn"),
         ["color"] = 5814783,
+        ["fields"] = {
+            {["name"] = "👤 Player", ["value"] = "||" .. player.Name .. "||", ["inline"] = true},
+            {["name"] = "⭐ Level", ["value"] = "**" .. displayNumber(level) .. "**", ["inline"] = true},
+            {["name"] = "👥 Party", ["value"] = "**" .. tostring(#Players:GetPlayers()) .. "**", ["inline"] = true},
+            {["name"] = "🪙 Total Gold", ["value"] = safeField(displayCurrency(gold)), ["inline"] = true},
+            {["name"] = "💎 Total Gems", ["value"] = safeField(displayCurrency(gems)), ["inline"] = true},
+            {["name"] = "⏱️ Run Time: " .. tostring(clearTime), ["value"] = "⌛ **Time Left: " .. readTimeLeft() .. "**", ["inline"] = true},
+        },
+        ["footer"] = { ["text"] = "NCL MACRO  •  Dungeon Quest Reborn" },
         ["timestamp"] = DateTime.now():ToIsoDate()
     }
+    if logo ~= "" then
+        embed["thumbnail"] = { ["url"] = logo }
+        embed["footer"]["icon_url"] = logo
+        embed["author"]["icon_url"] = logo
+    end
     if rewardData ~= nil then
         local goldGain, gemGain = extractGains(rewardData)
-        embed["fields"] = {
-            {["name"] = "Gold Received", ["value"] = safeField(displayCurrency(goldGain)), ["inline"] = true},
-            {["name"] = "Gems Received", ["value"] = safeField(displayCurrency(gemGain)), ["inline"] = true},
-            {["name"] = "Items Received", ["value"] = safeField(buildItemsText(rewardData)), ["inline"] = false}
-        }
+        table.insert(embed["fields"], {["name"] = "🎁 Rewards", ["value"] = "🪙 **+" .. safeField(displayCurrency(goldGain)) .. "**\n💎 **+" .. safeField(displayCurrency(gemGain)) .. "**", ["inline"] = false})
+        table.insert(embed["fields"], {["name"] = "📦 Items Received", ["value"] = safeField(buildItemsText(rewardData)), ["inline"] = false})
     end
 
-    return {
-        ["username"] = "NCL MACRO",
-        ["embeds"] = { embed }
-    }
+    local body = { ["username"] = "NCL MACRO", ["embeds"] = { embed } }
+    if logo ~= "" and not attach then body["avatar_url"] = logo end
+    if attach then body["_attachLogo"] = true end
+    return body
 end
-
 local function sendRewardWebhook(rewardData)
     local url = cleanWebhookUrl(SETTINGS.Webhook)
     if url == "" then return end
@@ -772,7 +830,11 @@ local function sendRewardWebhook(rewardData)
     local timeText = string.format("%dm %ds", math.floor(elapsed / 60), math.floor(elapsed % 60))
     runStartTime = os.clock()
 
-    postWebhook(url, buildStatusEmbed(timeText, nil, rewardData), "match")
+    -- wait a moment so the game has added the rewards to your Gems stat before it is read
+    task.spawn(function()
+        task.wait(1.5)
+        postWebhook(url, buildStatusEmbed(timeText, nil, rewardData), "match")
+    end)
 end
 
 local function sendTestWebhook(url)
@@ -850,6 +912,7 @@ return {
 Autoplay = SETTINGS.Autoplay,
 SelectedMacro = selectedMacroName,
 Webhook = SETTINGS.Webhook,
+WebhookLogo = SETTINGS.WebhookLogo,
 IgnoreKeywords = SETTINGS.IgnoreKeywords,
 IgnoreEnemyNames = SETTINGS.IgnoreEnemyNames,
 MinDistance = SETTINGS.MinDistance,
@@ -2563,6 +2626,7 @@ SETTINGS.MaxNodeDistance = cfg.MaxNodeDistance or SETTINGS.MaxNodeDistance
 SETTINGS.WallRayLength = cfg.WallRayLength or SETTINGS.WallRayLength
 SETTINGS.NoEnemyDelay = cfg.NoEnemyDelay or SETTINGS.NoEnemyDelay
 SETTINGS.Webhook = cfg.Webhook or ""
+if cfg.WebhookLogo ~= nil then SETTINGS.WebhookLogo = tostring(cfg.WebhookLogo) end
 SETTINGS.IgnoreKeywords = cfg.IgnoreKeywords or SETTINGS.IgnoreKeywords
 
 if cfg.AutoLobbyEnabled ~= nil then SETTINGS.AutoLobbyEnabled = cfg.AutoLobbyEnabled end
@@ -2626,6 +2690,7 @@ if UI.replayTimeInput then UI.replayTimeInput.Text = SETTINGS.ReplayTime end
 if UI.filterInput then UI.filterInput.Text = SETTINGS.IgnoreKeywords end
 if UI.joinNameInput then UI.joinNameInput.Text = SETTINGS.JoinPlayerName end
 if UI.webhookInput then UI.webhookInput.Text = SETTINGS.Webhook or "" end
+if UI.webhookLogoInput then UI.webhookLogoInput.Text = SETTINGS.WebhookLogo or "" end
 
 if UI.autoLobbyRow then
     UI.autoLobbyRow.Text = "Auto Lobby Routine: " .. (SETTINGS.AutoLobbyEnabled and "ON" or "OFF")
