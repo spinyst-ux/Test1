@@ -3617,10 +3617,13 @@ if activeTarget and activeTarget:FindFirstChild("HumanoidRootPart") then
     local flatToEnemy = Vector3.new(toEnemy.X, 0, toEnemy.Z)
 
     if SETTINGS.GameplayMode ~= "Manual Play" and alignOrient and alignOrient.Parent then
-        if not alignOrient.Enabled then alignOrient.CFrame = rootPart.CFrame; alignOrient.Enabled = true end
+        local wasOff = not alignOrient.Enabled
+        if wasOff then alignOrient.CFrame = rootPart.CFrame; alignOrient.Enabled = true end
         if humanoid.AutoRotate then humanoid.AutoRotate = false end
         if flatToEnemy.Magnitude > 0.1 then
-            alignOrient.CFrame = CFrame.lookAt(playerPos, Vector3.new(enemyPos.X, playerPos.Y, enemyPos.Z))
+            local look = CFrame.lookAt(playerPos, Vector3.new(enemyPos.X, playerPos.Y, enemyPos.Z))
+            alignOrient.CFrame = look
+            if wasOff then rootPart.CFrame = look end -- face the new target immediately
         end
     end
 else
@@ -3678,16 +3681,17 @@ if not isCasting and (now - lastAttackSequenceTime >= SETTINGS.AttackCooldown) t
                         if SETTINGS.GameplayMode ~= "Manual Play" and capturedTarget and capturedTarget:FindFirstChild("HumanoidRootPart") and rootPart then
                             local tPos = capturedTarget.HumanoidRootPart.Position
                             local lookRot = CFrame.lookAt(rootPart.Position, Vector3.new(tPos.X, rootPart.Position.Y, tPos.Z))
-                            if alignOrient and alignOrient.Parent and alignOrient.Enabled then
+                            if alignOrient and alignOrient.Parent then
                                 alignOrient.CFrame = lookRot
                             end
+                            -- rotate instantly; the constraint alone applies a physics step later
+                            rootPart.CFrame = lookRot
                         end
                     end
 
                     -- Fire Q if not reserved for Buff Spammer
                     if not (SETTINGS.EIFSpammerEnabled and SETTINGS.EIFSpammerSlot:upper() == "Q") then
                         snapFaceTarget()
-                        task.wait(0.02)
                         VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Q, false, game)
                         task.wait(0.06)
                         VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Q, false, game)
