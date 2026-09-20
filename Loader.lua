@@ -1867,7 +1867,7 @@ UI.avatarRow.MouseButton1Click:Connect(function()
 end)
 
 MakeSectionLabel("Auto send trade", tradePage)
-local tradeRow = MakeRow(tradePage, 96)
+local tradeRow = MakeRow(tradePage, 40)
 UI.tradeNameInput = MakeInput("Usernames (commas, spaces or new lines - no limit)...", tradeRow)
 UI.tradeNameInput.MultiLine = true
 UI.tradeNameInput.TextWrapped = true
@@ -1902,7 +1902,7 @@ end)
 
 MakeSectionLabel("Auto accept trade (only these users)", tradePage)
 UI.acceptNameInput = MakeInput("Usernames to accept (commas, spaces or new lines)...", tradePage)
-UI.acceptNameInput.Size = UDim2.new(1, 0, 0, 72)
+UI.acceptNameInput.Size = UDim2.new(1, 0, 0, 40)
 UI.acceptNameInput.MultiLine = true
 UI.acceptNameInput.TextWrapped = true
 UI.acceptNameInput.TextYAlignment = Enum.TextYAlignment.Top
