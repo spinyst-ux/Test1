@@ -35,6 +35,7 @@ local CONFIG_FILE = string.format("%s/config_%s.json", FOLDER_NAME, player.Name)
 local SPAWN_SHIELD_DURATION = 5.0
 local MAX_INVENTORY_CAPACITY = 300
 local MAIN_LOBBY_PLACE_ID = 77649408247578
+local DISCORD_INVITE = "https://discord.gg/sGJ3brqcJu"
 
 -- UI CONTAINER (Prevents exceeding Luau's 200 local register limit)
 local UI = {
@@ -111,6 +112,8 @@ local SETTINGS = {
     LobbyDifficulty = "Easy",
     LobbyHardcore = false,
     LobbyPrivate = false,
+    FollowHost = false,
+    AutoCreateLobby = true,
     TargetPartySize = 0,
     WaitForPlayers = true,
     AutoDodgeEnabled = true,
@@ -122,6 +125,7 @@ local SETTINGS = {
     LogoAvatar = true,
     AutoTrade = false,
     AutoAcceptTrade = false,
+    AutoAcceptRequireGold = false,
     AcceptUsername = "",
     TradeUsername = "",
     GameplayMode = "No TP Auto Play",
@@ -228,8 +232,8 @@ end
 
 local DODGE_DIRECTIONS = (function()
     local dirs = {}
-    for i = 0, 11 do
-        local angle = (math.pi / 6) * i
+    for i = 0, 15 do
+        local angle = (math.pi / 8) * i
         dirs[i + 1] = Vector3.new(math.cos(angle), 0, math.sin(angle))
     end
     return dirs
@@ -291,15 +295,21 @@ local function isInLobby()
 end
 -- AUTO-SELL SYSTEM (Category-Specific Customization)
 
-local function executeAutoSell()
-if not isInLobby() then return end
+local function executeAutoSell(quiet)
+-- works in the lobby and in a dungeon; it only needs the sell shop GUI to exist in PlayerGui
 local pGui = player:FindFirstChild("PlayerGui")
 if not pGui then return end
 local sellShop = pGui:FindFirstChild("sellShop")
-if not sellShop then return end
+if not sellShop then
+    if not quiet then setStatus("Auto-Sell: sell shop GUI not found", true) end
+    return
+end
 
 local scroll = findNested(sellShop, "Frame", "innerFrame", "rightSideFrame", "ScrollingFrame")
-if not scroll then return end
+if not scroll then
+    if not quiet then setStatus("Auto-Sell: item list not found", true) end
+    return
+end
 
 local payload = { chest = {}, ability = {}, helmet = {}, weapon = {} }
 local totalItemCount = 0
@@ -341,6 +351,7 @@ if totalItemCount > 0 then
             safeInvoke(sellItemEvent, payload)
         end
     end)
+    setStatus(string.format("Auto-Sell: sold %d items", totalItemCount), true)
 end
 end
 
@@ -467,7 +478,7 @@ task.spawn(function()
     local remotes = ReplicatedStorage:WaitForChild("remotes", 5)
     if not remotes then isHandlingLobbyRoutine = false; return end
 
-    if SETTINGS.LobbyMode == "Join" then
+    if SETTINGS.FollowHost or SETTINGS.LobbyMode == "Join" then
         if SETTINGS.JoinPlayerName ~= "" then
             local hostInServer = false
             for _, p in ipairs(Players:GetPlayers()) do
@@ -486,6 +497,9 @@ task.spawn(function()
             end
         end
         task.wait(2.0)
+        isHandlingLobbyRoutine = false
+        return
+    elseif not SETTINGS.AutoCreateLobby then
         isHandlingLobbyRoutine = false
         return
     else
@@ -783,6 +797,84 @@ local function extractGains(rewardData)
 end
 pcall(function() local g = findPlayerStat({"Gems", "gems", "Diamonds", "Gem"}); if type(g) == "number" then UI.lastGems = g end end)
 
+-- " (Nightmare)": difficulty of the current run. Uses a difficulty value from the game if one exists in Workspace,
+-- otherwise the difficulty picked in the Misc tab.
+function UI.getDifficultyTextBasic(mapName)
+    local diff
+    -- 1) look for a real difficulty value / attribute / HUD label in the game (name contains "difficulty" or "diff")
+    pcall(function()
+        local function isDiffName(n) n = tostring(n):lower(); return n:find("difficulty", 1, true) or n == "diff" end
+        local function fromAttributes(inst)
+            for k, v in pairs(inst:GetAttributes()) do
+                if isDiffName(k) and tostring(v) ~= "" then return tostring(v) end
+            end
+        end
+        local dObj = Workspace:FindFirstChild("dungeonName")
+        diff = dObj and fromAttributes(dObj) or fromAttributes(Workspace)
+        if diff then return end
+        for _, root in ipairs({ Workspace, ReplicatedStorage, player }) do
+            for _, obj in ipairs(root:GetDescendants()) do
+                if obj:IsA("ValueBase") and isDiffName(obj.Name) and tostring(obj.Value) ~= "" then diff = tostring(obj.Value); return end
+            end
+        end
+        local pGui = player:FindFirstChild("PlayerGui")
+        for _, obj in ipairs(pGui and pGui:GetDescendants() or {}) do
+            if obj:IsA("TextLabel") and isDiffName(obj.Name) and obj.Text ~= "" and #obj.Text < 20 then diff = obj.Text; return end
+        end
+    end)
+    -- 2) no real value found: only trust the Misc tab setting when you hosted this exact map yourself
+    if not diff and SETTINGS.LobbyMode == "Host" and tostring(mapName or ""):lower() == tostring(SETTINGS.LobbyMap):lower() then
+        diff = SETTINGS.LobbyDifficulty
+    end
+    diff = tostring(diff or "")
+    return diff ~= "" and (" (" .. diff .. ")") or ""
+end
+
+UI.knownDifficulties = { easy = true, normal = true, medium = true, hard = true, expert = true, insane = true, nightmare = true, extreme = true, impossible = true }
+
+-- Looks for the run's difficulty in (1) the reward data the game sent, (2) a visible HUD label that shows exactly one
+-- difficulty name, (3) the game values / your own setting (see UI.getDifficultyTextBasic). Logs the reward data if all fail.
+function UI.getDifficultyText(mapName, rewardData)
+    local found
+    pcall(function()
+        local function scan(tbl, depth)
+            if found or depth > 4 then return end
+            for k, v in pairs(tbl) do
+                if type(v) == "table" then scan(v, depth + 1)
+                elseif type(k) == "string" and k:lower():find("diff", 1, true) and tostring(v) ~= "" then found = tostring(v); return end
+            end
+        end
+        if type(rewardData) == "table" then scan(rewardData, 0) end
+    end)
+    if not found then
+        pcall(function()
+            local pGui = player:FindFirstChild("PlayerGui")
+            local names, list = {}, {}
+            for _, obj in ipairs(pGui and pGui:GetDescendants() or {}) do
+                if obj:IsA("TextLabel") and obj.Visible and obj.AbsoluteSize.X > 0 and not (UI.screenGui and obj:IsDescendantOf(UI.screenGui)) then
+                    local txt = obj.Text:match("^%s*(.-)%s*$")
+                    if UI.knownDifficulties[txt:lower()] then
+                        local shown, cur = true, obj
+                        while cur and cur ~= pGui do
+                            if (cur:IsA("GuiObject") and not cur.Visible) or (cur:IsA("ScreenGui") and not cur.Enabled) then shown = false break end
+                            cur = cur.Parent
+                        end
+                        if shown then names[txt] = true end
+                    end
+                end
+            end
+            for n in pairs(names) do table.insert(list, n) end
+            if #list == 1 then found = list[1] end
+        end)
+    end
+    if found then return " (" .. found .. ")" end
+    local basic = UI.getDifficultyTextBasic(mapName)
+    if basic == "" and type(rewardData) == "table" then
+        pcall(function() warn("[Webhook] difficulty not found. Reward data from the game: " .. HttpService:JSONEncode(rewardData)) end)
+    end
+    return basic
+end
+
 local function buildStatusEmbed(clearTime, title, rewardData)
     local level = findPlayerStat({"Level", "level", "Lvl"})
     if level == nil then level = findHudNumber({"level", "lvl"}) end
@@ -817,7 +909,7 @@ local function buildStatusEmbed(clearTime, title, rewardData)
             {["name"] = "🪙 Total Gold", ["value"] = safeField(displayCurrency(gold)), ["inline"] = true},
             {["name"] = "💎 Total Gems", ["value"] = safeField(displayCurrency(gems)), ["inline"] = true},
             {["name"] = "⏱️ Run Time: " .. tostring(clearTime), ["value"] = "⌛ **Time Left: " .. readTimeLeft() .. "**", ["inline"] = true},
-            {["name"] = "🗺️ Map Cleared", ["value"] = "**" .. safeField(mapName) .. "**", ["inline"] = true},
+            {["name"] = "🗺️ Map Cleared", ["value"] = "**" .. safeField(mapName .. (isInLobby() and "" or UI.getDifficultyText(mapName, rewardData))) .. "**", ["inline"] = true},
             {["name"] = "🎒 Inventory", ["value"] = "**" .. tostring(getInventoryCount()) .. "/" .. tostring(MAX_INVENTORY_CAPACITY) .. "**", ["inline"] = true},
         },
         ["footer"] = { ["text"] = "NCL MACRO  •  Dungeon Quest Reborn" },
@@ -890,9 +982,10 @@ if remotes then
 local showJoinRequest = remotes:WaitForChild("showJoinRequest", 5)
 if showJoinRequest then
 local conn = showJoinRequest.OnClientEvent:Connect(function(reqId, pName)
-if isAutoplay and SETTINGS.LobbyMode == "Host" then
+pcall(warn, "[Join] showJoinRequest fired: " .. tostring(reqId) .. ", " .. tostring(pName) .. " (autoplay=" .. tostring(isAutoplay) .. ", role=" .. tostring(SETTINGS.LobbyMode) .. ")")
+if isAutoplay and SETTINGS.LobbyMode == "Host" and not SETTINGS.FollowHost then
 task.spawn(function()
-task.wait(2.0)
+task.wait(0.1)
 local respondJoinRequest = remotes:FindFirstChild("respondJoinRequest")
 if respondJoinRequest then
 respondJoinRequest:FireServer(reqId, true)
@@ -955,6 +1048,8 @@ LobbyMap = SETTINGS.LobbyMap,
 LobbyDifficulty = SETTINGS.LobbyDifficulty,
 LobbyHardcore = SETTINGS.LobbyHardcore,
 LobbyPrivate = SETTINGS.LobbyPrivate,
+FollowHost = SETTINGS.FollowHost,
+AutoCreateLobby = SETTINGS.AutoCreateLobby,
 TargetPartySize = SETTINGS.TargetPartySize,
 WaitForPlayers = SETTINGS.WaitForPlayers,
 AutoDodgeEnabled = SETTINGS.AutoDodgeEnabled,
@@ -966,6 +1061,7 @@ RenameParty = SETTINGS.RenameParty,
 LogoAvatar = SETTINGS.LogoAvatar,
 AutoTrade = SETTINGS.AutoTrade,
 AutoAcceptTrade = SETTINGS.AutoAcceptTrade,
+AutoAcceptRequireGold = SETTINGS.AutoAcceptRequireGold,
 AcceptUsername = SETTINGS.AcceptUsername,
 TradeUsername = SETTINGS.TradeUsername,
 GameplayMode = SETTINGS.GameplayMode,
@@ -1377,7 +1473,7 @@ else
 end
 screenGui.Parent = targetParent
 
-local WINDOW_W, WINDOW_H = 860, 500
+local WINDOW_W, WINDOW_H = 900, 540
 
 local mainFrame = Instance.new("Frame")
 mainFrame.Size = UDim2.new(0, WINDOW_W, 0, WINDOW_H)
@@ -1395,10 +1491,20 @@ stroke(mainFrame)
 local uiScale = Instance.new("UIScale")
 local cam = Workspace.CurrentCamera
 local viewport = cam and cam.ViewportSize or Vector2.new(1280, 720)
-UI.baseScale = math.clamp(math.min(viewport.X / 900, viewport.Y / 560), 0.45, 1)
+UI.baseScale = math.clamp(math.min(viewport.X / 940, viewport.Y / 600), 0.45, 1)
 uiScale.Scale = UI.baseScale
 uiScale.Parent = mainFrame
 UI.uiScale = uiScale
+
+-- open animation: the window pops in from slightly smaller
+function UI.popIn()
+    pcall(function()
+        local target = uiScale.Scale
+        uiScale.Scale = target * 0.92
+        game:GetService("TweenService"):Create(uiScale, TweenInfo.new(0.25, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = target }):Play()
+    end)
+end
+UI.popIn()
 
 -- HEADER
 local header = Instance.new("Frame")
@@ -1409,6 +1515,21 @@ header.BorderSizePixel = 0
 header.Parent = mainFrame
 round(header, 12)
 stroke(header)
+
+-- thin gradient accent line along the bottom of the header
+local accentLine = Instance.new("Frame")
+accentLine.Size = UDim2.new(1, -28, 0, 2)
+accentLine.Position = UDim2.new(0, 14, 1, -2)
+accentLine.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+accentLine.BorderSizePixel = 0
+accentLine.Parent = header
+local accentGrad = Instance.new("UIGradient")
+accentGrad.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, T.accent),
+    ColorSequenceKeypoint.new(0.5, T.accent2),
+    ColorSequenceKeypoint.new(1, T.pink),
+})
+accentGrad.Parent = accentLine
 
 -- LOGO: uses "dungeonmacros/logo.png" from the executor workspace if it exists,
 -- otherwise draws the "N" mark from gradient shapes.
@@ -1459,7 +1580,9 @@ local function makeWindowButton(x)
     btn.BorderSizePixel = 0
     btn.Parent = header
     round(btn, 8)
-    stroke(btn)
+    local btnStroke = stroke(btn)
+    btn.MouseEnter:Connect(function() btnStroke.Color = T.accent end)
+    btn.MouseLeave:Connect(function() btnStroke.Color = T.stroke end)
     return btn
 end
 
@@ -1524,6 +1647,58 @@ local function MakeButton(text, color, parent)
     g.Rotation = 90
     g.Color = ColorSequence.new(Color3.fromRGB(255, 255, 255), Color3.fromRGB(205, 208, 226))
     g.Parent = btn
+    -- hover / press feedback via the gradient, so it never fights the ON/OFF colors set elsewhere
+    local function shade(bottom, speed)
+        pcall(function()
+            game:GetService("TweenService"):Create(g, TweenInfo.new(speed or 0.12), { Color = ColorSequence.new(Color3.fromRGB(255, 255, 255), bottom) }):Play()
+        end)
+    end
+    btn.AutoButtonColor = false
+    btn.MouseEnter:Connect(function() shade(Color3.fromRGB(245, 246, 255)) end)
+    btn.MouseLeave:Connect(function() shade(Color3.fromRGB(205, 208, 226)) end)
+    btn.MouseButton1Down:Connect(function() shade(Color3.fromRGB(150, 154, 180), 0.06) end)
+    btn.MouseButton1Up:Connect(function() shade(Color3.fromRGB(245, 246, 255), 0.1) end)
+    return btn
+end
+
+-- ON/OFF toggle row: a MakeButton with a small LED dot + colored glow outline that stays in sync automatically
+-- whenever the button's BackgroundColor3 is set (every toggle handler already does this), so no other code
+-- anywhere in the script needs to change - existing "row.Text = ..." / "row.BackgroundColor3 = ..." keeps working.
+local TOGGLE_ON_COLOR = Color3.fromRGB(40, 150, 70)
+local function MakeToggle(text, isOn, parent)
+    local btn = MakeButton(text, isOn and TOGGLE_ON_COLOR or T.idle, parent)
+
+    local led = Instance.new("Frame")
+    led.Name = "ToggleLED"
+    led.AnchorPoint = Vector2.new(1, 0.5)
+    led.Position = UDim2.new(1, -12, 0.5, 0)
+    led.Size = UDim2.new(0, 8, 0, 8)
+    led.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    led.BorderSizePixel = 0
+    led.ZIndex = 3
+    led.Parent = btn
+    round(led, 4)
+    local ledGlow = Instance.new("UIStroke")
+    ledGlow.Color = Color3.fromRGB(255, 255, 255)
+    ledGlow.Thickness = 1
+    ledGlow.Transparency = 0.5
+    ledGlow.Parent = led
+
+    local edge = stroke(btn, T.stroke, 1)
+
+    local function sync()
+        local on = btn.BackgroundColor3 == TOGGLE_ON_COLOR
+        led.BackgroundColor3 = on and Color3.fromRGB(220, 255, 235) or Color3.fromRGB(120, 128, 150)
+        edge.Color = on and Color3.fromRGB(70, 220, 140) or T.stroke
+        edge.Transparency = on and 0.35 or 0.6
+        pcall(function()
+            game:GetService("TweenService"):Create(led, TweenInfo.new(0.15), {
+                Size = on and UDim2.new(0, 9, 0, 9) or UDim2.new(0, 7, 0, 7)
+            }):Play()
+        end)
+    end
+    sync()
+    btn:GetPropertyChangedSignal("BackgroundColor3"):Connect(sync)
     return btn
 end
 
@@ -1542,7 +1717,9 @@ local function MakeInput(placeholder, parent)
     box.BorderSizePixel = 0
     box.Parent = parent
     round(box, 8)
-    stroke(box)
+    local boxStroke = stroke(box)
+    box.Focused:Connect(function() boxStroke.Color = T.accent; boxStroke.Thickness = 1.5 end)
+    box.FocusLost:Connect(function() boxStroke.Color = T.stroke; boxStroke.Thickness = 1 end)
     local pad = Instance.new("UIPadding")
     pad.PaddingLeft = UDim.new(0, 12)
     pad.PaddingRight = UDim.new(0, 12)
@@ -1569,7 +1746,7 @@ local function rowSize(fraction, count)
 end
 
 local function MakeSectionLabel(text, parent)
-    local lbl = makeText(parent, text, 12, T.muted, Enum.Font.GothamBold)
+    local lbl = makeText(parent, text:upper(), 11, T.muted, Enum.Font.GothamBold)
     lbl.Size = UDim2.new(1, 0, 0, 18)
     return lbl
 end
@@ -1595,7 +1772,9 @@ local function MakeSettingRow(labelText, defaultVal, parent)
     box.BorderSizePixel = 0
     box.Parent = frame
     round(box, 8)
-    stroke(box)
+    local boxStroke = stroke(box)
+    box.Focused:Connect(function() boxStroke.Color = T.accent; boxStroke.Thickness = 1.5 end)
+    box.FocusLost:Connect(function() boxStroke.Color = T.stroke; boxStroke.Thickness = 1 end)
     return box
 end
 
@@ -1712,7 +1891,8 @@ local function getAvailableDifficulties()
 end
 
 -- PAGES
-local PAGE_W, PAGE_H = 580, 294
+local PAGE_W, PAGE_H = 620, 334
+local RIGHT_COL_X = PAGE_W + 24
 
 local function createPage(title, subtitle)
     local page = Instance.new("ScrollingFrame")
@@ -1762,13 +1942,20 @@ local settingsPage = createPage("Setting", "Combat, movement and timing options.
 local tradePage = createPage("Auto Trade", "Send and accept trades automatically.")
 local buildPage = createPage("Build", "Instantly spend all your free skill points.")
 local miscPage = createPage("Misc", "Lobby routine, gameplay mode and extras.")
+local joinPage = createPage("Auto Join", "Join a host's lobby and leave when they leave.")
 
--- TABS
-local tabBar = Instance.new("Frame")
+-- TABS (horizontally scrollable: drag/swipe left-right when there are more tabs than fit)
+local tabBar = Instance.new("ScrollingFrame")
 tabBar.Size = UDim2.new(0, PAGE_W, 0, 46)
 tabBar.Position = UDim2.new(0, 12, 0, 84)
 tabBar.BackgroundColor3 = T.panel
 tabBar.BorderSizePixel = 0
+tabBar.ScrollingDirection = Enum.ScrollingDirection.X
+tabBar.ScrollBarThickness = 3
+tabBar.ScrollBarImageColor3 = T.accent2
+tabBar.ScrollBarImageTransparency = 0.4
+tabBar.CanvasSize = UDim2.new(0, 0, 0, 0)
+tabBar.AutomaticCanvasSize = Enum.AutomaticSize.X
 tabBar.Parent = body
 round(tabBar, 12)
 stroke(tabBar)
@@ -1800,7 +1987,7 @@ end
 
 local function createTab(text, page)
     local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1/7, -4, 1, 0)
+    btn.Size = UDim2.new(0, 116, 1, 0)
     btn.BackgroundColor3 = T.accent
     btn.BackgroundTransparency = 1
     btn.Text = text
@@ -1822,6 +2009,13 @@ local function createTab(text, page)
     table.insert(tabs, { btn = btn, page = page, bar = bar })
     local index = #tabs
     btn.MouseButton1Click:Connect(function() switchTab(index) end)
+    -- hover highlight for inactive tabs
+    btn.MouseEnter:Connect(function()
+        if not bar.Visible then btn.TextColor3 = T.text; btn.BackgroundTransparency = 0.85 end
+    end)
+    btn.MouseLeave:Connect(function()
+        if not bar.Visible then btn.TextColor3 = T.muted; btn.BackgroundTransparency = 1 end
+    end)
 end
 
 createTab("Macro", macroPage)
@@ -1829,15 +2023,16 @@ createTab("Webhook", webhookPage)
 createTab("Auto Sell", sellPage)
 createTab("Setting", settingsPage)
 createTab("Auto Trade", tradePage)
+createTab("Auto Join", joinPage)
 createTab("Build", buildPage)
 createTab("Misc", miscPage)
 
 -- MACRO TAB
 local macroRowA = MakeRow(macroPage, 40)
 local recordBtn = MakeButton("▶  Start Recording", T.accent, macroRowA)
-recordBtn.Size = rowSize(0.34, 4)
+recordBtn.Size = rowSize(0.3, 4)
 local stopRecordBtn = MakeButton("■  Stop Recording", T.idle, macroRowA)
-stopRecordBtn.Size = rowSize(0.26, 4)
+stopRecordBtn.Size = rowSize(0.3, 4)
 local clearWaypointsBtn = MakeButton("Clear Nodes", T.idle, macroRowA)
 clearWaypointsBtn.Size = rowSize(0.2, 4)
 local addWaypointBtn = MakeButton("+ Node", T.idle, macroRowA)
@@ -1865,11 +2060,11 @@ importBtn.Size = rowSize(0.2, 3)
 
 local macroRowC = MakeRow(macroPage, 38)
 local nameInput = MakeInput("Macro name (e.g. Run1)", macroRowC)
-nameInput.Size = rowSize(0.5, 3)
+nameInput.Size = rowSize(0.6, 3)
 local saveBtn = MakeButton("Save", Color3.fromRGB(34, 160, 100), macroRowC)
-saveBtn.Size = rowSize(0.25, 3)
+saveBtn.Size = rowSize(0.2, 3)
 local deleteBtn = MakeButton("Delete", Color3.fromRGB(190, 48, 80), macroRowC)
-deleteBtn.Size = rowSize(0.25, 3)
+deleteBtn.Size = rowSize(0.2, 3)
 
 local importInput = MakeInput("Paste JSON to import...", macroPage)
 importInput.Size = UDim2.new(1, 0, 0, 38)
@@ -1936,7 +2131,7 @@ UI.maxDistInput = MakeSettingRow("Max Combat Dist (Kite):", SETTINGS.MaxDistance
 UI.atkReachInput = MakeSettingRow("Attack Reach (Max Fire Dist):", SETTINGS.AttackReach, settingsPage)
 
 -- RANGE CIRCLES: rings on the ground around you (red = Min run-away, yellow = Max kite, green = Attack reach)
-UI.rangeCircleRow = MakeButton("Show Range Circle: " .. (SETTINGS.ShowRangeCircle and "ON" or "OFF"), SETTINGS.ShowRangeCircle and Color3.fromRGB(40, 150, 70) or T.idle, settingsPage)
+UI.rangeCircleRow = MakeToggle("Show Range Circle: " .. (SETTINGS.ShowRangeCircle and "ON" or "OFF"), SETTINGS.ShowRangeCircle, settingsPage)
 UI.rangeCircleRow.MouseButton1Click:Connect(function()
     SETTINGS.ShowRangeCircle = not SETTINGS.ShowRangeCircle
     UI.rangeCircleRow.Text = "Show Range Circle: " .. (SETTINGS.ShowRangeCircle and "ON" or "OFF")
@@ -2056,7 +2251,7 @@ UI.customNameInput.Text = SETTINGS.CustomName or ""
 UI.customNameInput.Size = rowSize(0.68, 2)
 local applyNameBtn = MakeButton("Apply Name", T.accent, nameRow)
 applyNameBtn.Size = rowSize(0.32, 2)
-UI.partyNameRow = MakeButton("Rename Party Too: " .. (SETTINGS.RenameParty and "ON" or "OFF"), SETTINGS.RenameParty and Color3.fromRGB(40, 150, 70) or T.idle, miscPage)
+UI.partyNameRow = MakeToggle("Rename Party Too: " .. (SETTINGS.RenameParty and "ON" or "OFF"), SETTINGS.RenameParty, miscPage)
 UI.partyNameRow.LayoutOrder = 102
 applyNameBtn.MouseButton1Click:Connect(function() UI.applyCustomName(UI.customNameInput.Text) end)
 UI.customNameInput.FocusLost:Connect(function(enter) if enter then UI.applyCustomName(UI.customNameInput.Text) end end)
@@ -2080,7 +2275,7 @@ UI.tradeNameInput.Text = SETTINGS.TradeUsername or ""
 UI.tradeNameInput.Size = rowSize(0.68, 2)
 local tradeNowBtn = MakeButton("Send Now", T.accent, tradeRow)
 tradeNowBtn.Size = rowSize(0.32, 2)
-UI.autoTradeRow = MakeButton("Auto Send Trade: " .. (SETTINGS.AutoTrade and "ON" or "OFF"), SETTINGS.AutoTrade and Color3.fromRGB(40, 150, 70) or T.idle, tradePage)
+UI.autoTradeRow = MakeToggle("Auto Send Trade: " .. (SETTINGS.AutoTrade and "ON" or "OFF"), SETTINGS.AutoTrade, tradePage)
 UI.tradeStatus = makeText(tradePage, "Trade: idle", 12, T.muted, Enum.Font.Gotham)
 UI.tradeStatus.Size = UDim2.new(1, 0, 0, 30)
 UI.tradeStatus.TextWrapped = true
@@ -2116,7 +2311,14 @@ UI.acceptNameInput.FocusLost:Connect(function()
     SETTINGS.AcceptUsername = UI.acceptNameInput.Text:match("^%s*(.-)%s*$")
     saveConfig()
 end)
-UI.autoAcceptRow = MakeButton("Auto Accept Trade: " .. (SETTINGS.AutoAcceptTrade and "ON" or "OFF"), SETTINGS.AutoAcceptTrade and Color3.fromRGB(40, 150, 70) or T.idle, tradePage)
+UI.autoAcceptRow = MakeToggle("Auto Accept Trade: " .. (SETTINGS.AutoAcceptTrade and "ON" or "OFF"), SETTINGS.AutoAcceptTrade, tradePage)
+UI.requireGoldRow = MakeToggle("Skip Trade if Gold is 0: " .. (SETTINGS.AutoAcceptRequireGold and "ON" or "OFF"), SETTINGS.AutoAcceptRequireGold, tradePage)
+UI.requireGoldRow.MouseButton1Click:Connect(function()
+    SETTINGS.AutoAcceptRequireGold = not SETTINGS.AutoAcceptRequireGold
+    UI.requireGoldRow.Text = "Skip Trade if Gold is 0: " .. (SETTINGS.AutoAcceptRequireGold and "ON" or "OFF")
+    UI.requireGoldRow.BackgroundColor3 = SETTINGS.AutoAcceptRequireGold and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
+    saveConfig()
+end)
 UI.acceptStatus = makeText(tradePage, "Accept: waiting for a trade request", 12, T.muted, Enum.Font.Gotham)
 UI.acceptStatus.Size = UDim2.new(1, 0, 0, 30)
 UI.acceptStatus.TextWrapped = true
@@ -2145,41 +2347,65 @@ UI.buildStatus.Size = UDim2.new(1, 0, 0, 30)
 UI.buildStatus.TextWrapped = true
 UI.buildStatus.TextYAlignment = Enum.TextYAlignment.Top
 
-UI.blackScreenRow = MakeButton("Black Screen (RightCtrl): OFF", T.idle, miscPage)
+UI.blackScreenRow = MakeToggle("Black Screen (RightCtrl): OFF", false, miscPage)
 UI.blackScreenRow.LayoutOrder = 103
-UI.autoHideRow = MakeButton("Auto Hide UI: " .. (SETTINGS.AutoHideUI and "ON" or "OFF"), SETTINGS.AutoHideUI and Color3.fromRGB(40, 150, 70) or T.idle, miscPage)
+UI.autoHideRow = MakeToggle("Auto Hide UI: " .. (SETTINGS.AutoHideUI and "ON" or "OFF"), SETTINGS.AutoHideUI, miscPage)
 UI.autoHideRow.LayoutOrder = 104
-UI.autoLobbyRow = MakeButton("Auto Lobby Routine: " .. (SETTINGS.AutoLobbyEnabled and "ON" or "OFF"), SETTINGS.AutoLobbyEnabled and Color3.fromRGB(40, 150, 70) or T.idle, miscPage)
-UI.roleRow = MakeButton("Lobby Role: " .. SETTINGS.LobbyMode:upper(), Color3.fromRGB(58, 80, 200), miscPage)
+UI.autoLobbyRow = MakeToggle("Auto Lobby Routine: " .. (SETTINGS.AutoLobbyEnabled and "ON" or "OFF"), SETTINGS.AutoLobbyEnabled, miscPage)
+UI.followHostRow = MakeToggle("Follow Host: " .. (SETTINGS.FollowHost and "ON" or "OFF"), SETTINGS.FollowHost, joinPage)
+UI.followHostRow.MouseButton1Click:Connect(function()
+    SETTINGS.FollowHost = not SETTINGS.FollowHost
+    UI.followHostRow.Text = "Follow Host: " .. (SETTINGS.FollowHost and "ON" or "OFF")
+    UI.followHostRow.BackgroundColor3 = SETTINGS.FollowHost and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
+    UI.hostSeen, UI.hostMissingSince = false, nil
+    saveConfig()
+end)
+local followNote = makeText(joinPage, "ON: joins the host typed below (sends a join request) and leaves the game when the host leaves.", 12, T.muted, Enum.Font.Gotham)
+followNote.Size = UDim2.new(1, 0, 0, 30)
+followNote.TextWrapped = true
+followNote.TextYAlignment = Enum.TextYAlignment.Top
+UI.roleRow = MakeButton("Lobby Role: " .. SETTINGS.LobbyMode:upper(), Color3.fromRGB(58, 80, 200), joinPage)
 
-UI.joinNameInput = MakeSettingRow("Join Player Name:", SETTINGS.JoinPlayerName, miscPage)
+UI.joinNameInput = MakeSettingRow("Join Player Name:", SETTINGS.JoinPlayerName, joinPage)
 UI.joinNameInput.PlaceholderText = "Friend's Username..."
-UI.partySizeInput = MakeSettingRow("Required Party Size (0 for solo):", SETTINGS.TargetPartySize, miscPage)
+UI.partySizeInput = MakeSettingRow("Required Party Size (0 for solo):", SETTINGS.TargetPartySize, joinPage)
 
-UI.mapDropdown = MakeDropdownRow("Map Name:", getAvailableMaps, SETTINGS.LobbyMap, miscPage, function(val)
+UI.autoCreateLobbyRow = MakeToggle("Auto Create Lobby: " .. (SETTINGS.AutoCreateLobby and "ON" or "OFF"), SETTINGS.AutoCreateLobby, joinPage)
+UI.autoCreateLobbyRow.MouseButton1Click:Connect(function()
+    SETTINGS.AutoCreateLobby = not SETTINGS.AutoCreateLobby
+    UI.autoCreateLobbyRow.Text = "Auto Create Lobby: " .. (SETTINGS.AutoCreateLobby and "ON" or "OFF")
+    UI.autoCreateLobbyRow.BackgroundColor3 = SETTINGS.AutoCreateLobby and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
+    saveConfig()
+end)
+local autoCreateNote = makeText(joinPage, "ON (Host role): creates a lobby with the Map Name and Difficulty below, then auto-starts it.", 12, T.muted, Enum.Font.Gotham)
+autoCreateNote.Size = UDim2.new(1, 0, 0, 30)
+autoCreateNote.TextWrapped = true
+autoCreateNote.TextYAlignment = Enum.TextYAlignment.Top
+
+UI.mapDropdown = MakeDropdownRow("Map Name:", getAvailableMaps, SETTINGS.LobbyMap, joinPage, function(val)
     SETTINGS.LobbyMap = val
     saveConfig()
 end)
 
-UI.diffDropdown = MakeDropdownRow("Difficulty:", getAvailableDifficulties, SETTINGS.LobbyDifficulty, miscPage, function(val)
+UI.diffDropdown = MakeDropdownRow("Difficulty:", getAvailableDifficulties, SETTINGS.LobbyDifficulty, joinPage, function(val)
     SETTINGS.LobbyDifficulty = val
     saveConfig()
 end)
 
-UI.waitForPlayersRow = MakeButton("Wait for Party in Dungeon: " .. (SETTINGS.WaitForPlayers and "ON" or "OFF"), SETTINGS.WaitForPlayers and Color3.fromRGB(40, 150, 70) or T.idle, miscPage)
-UI.hcRow = MakeButton("Hardcore Mode: OFF", T.idle, miscPage)
-UI.privRow = MakeButton("Private Lobby: OFF", T.idle, miscPage)
+UI.waitForPlayersRow = MakeToggle("Wait for Party in Dungeon: " .. (SETTINGS.WaitForPlayers and "ON" or "OFF"), SETTINGS.WaitForPlayers, joinPage)
+UI.hcRow = MakeToggle("Hardcore Mode: OFF", false, joinPage)
+UI.privRow = MakeToggle("Private Lobby: OFF", false, joinPage)
 UI.modeRow = MakeButton("Gameplay Mode: " .. SETTINGS.GameplayMode, Color3.fromRGB(58, 80, 200), miscPage)
-UI.autoDodgeRow = MakeButton("Auto Dodging: " .. (SETTINGS.AutoDodgeEnabled and "ON" or "OFF"), SETTINGS.AutoDodgeEnabled and Color3.fromRGB(40, 150, 70) or T.idle, miscPage)
-UI.repDiscRow = MakeButton("Replay on Disconnects: " .. (SETTINGS.ReplayOnDisconnect and "ON" or "OFF"), SETTINGS.ReplayOnDisconnect and Color3.fromRGB(40, 150, 70) or T.idle, miscPage)
-UI.rejDiscRow = MakeButton("Rejoin on Disconnect: " .. (SETTINGS.RejoinOnDisconnect and "ON" or "OFF"), SETTINGS.RejoinOnDisconnect and Color3.fromRGB(40, 150, 70) or T.idle, miscPage)
+UI.autoDodgeRow = MakeToggle("Auto Dodging: " .. (SETTINGS.AutoDodgeEnabled and "ON" or "OFF"), SETTINGS.AutoDodgeEnabled, miscPage)
+UI.repDiscRow = MakeToggle("Replay on Disconnects: " .. (SETTINGS.ReplayOnDisconnect and "ON" or "OFF"), SETTINGS.ReplayOnDisconnect, miscPage)
+UI.rejDiscRow = MakeToggle("Rejoin on Disconnect: " .. (SETTINGS.RejoinOnDisconnect and "ON" or "OFF"), SETTINGS.RejoinOnDisconnect, miscPage)
 
-UI.eifToggleBtn = MakeButton("EIF Spammer: " .. (SETTINGS.EIFSpammerEnabled and "ON" or "OFF"), SETTINGS.EIFSpammerEnabled and Color3.fromRGB(40, 150, 70) or T.idle, miscPage)
+UI.eifToggleBtn = MakeToggle("EIF Spammer: " .. (SETTINGS.EIFSpammerEnabled and "ON" or "OFF"), SETTINGS.EIFSpammerEnabled, miscPage)
 UI.eifSlotBtn = MakeButton("EIF Slot: " .. SETTINGS.EIFSpammerSlot:upper(), Color3.fromRGB(58, 80, 200), miscPage)
 UI.eifDelayInput = MakeSettingRow("EIF Spam Delay (s):", SETTINGS.EIFSpammerDelay, miscPage)
 
 -- AUTO-SELL TAB (Expanded Customizable Matrix)
-UI.autoSellToggleBtn = MakeButton("Auto Sell: OFF", T.idle, sellPage)
+UI.autoSellToggleBtn = MakeToggle("Auto Sell: OFF", false, sellPage)
 local sellNowBtn = MakeButton("Sell Matching Items Now", Color3.fromRGB(190, 105, 30), sellPage)
 
 local function setupCategoryRaritySection(catKey, catDisplayName)
@@ -2198,7 +2424,7 @@ local function setupCategoryRaritySection(catKey, catDisplayName)
 
     local buttons = {}
     for _, rarity in ipairs(RARITY_ORDER) do
-        local rBtn = MakeButton(rarity:upper() .. ": OFF", T.idle, container)
+        local rBtn = MakeToggle(rarity:upper() .. ": OFF", false, container)
         buttons[rarity] = rBtn
 
         rBtn.MouseButton1Click:Connect(function()
@@ -2246,7 +2472,7 @@ sellNowBtn.MouseButton1Click:Connect(executeAutoSell)
 -- BOTTOM CONTROLS
 local bottomBar = Instance.new("Frame")
 bottomBar.Size = UDim2.new(0, PAGE_W, 0, 46)
-bottomBar.Position = UDim2.new(0, 12, 0, 442)
+bottomBar.Position = UDim2.new(0, 12, 0, 482)
 bottomBar.BackgroundTransparency = 1
 bottomBar.Parent = body
 
@@ -2256,16 +2482,18 @@ runMacroBtn.TextSize = 14
 runMacroBtn.Font = Enum.Font.GothamBold
 UI.runMacroBtn = runMacroBtn
 
-local terminateBtn = MakeButton(">_  Kill Script", T.idle, bottomBar)
+local terminateBtn = MakeButton("💬  Discord", Color3.fromRGB(54, 62, 150), bottomBar)
 terminateBtn.Size = UDim2.new(0.32, 0, 1, 0)
 terminateBtn.Position = UDim2.new(0.68, 0, 0, 0)
-stroke(terminateBtn)
+local killStroke = stroke(terminateBtn, Color3.fromRGB(60, 70, 190))
+terminateBtn.MouseEnter:Connect(function() killStroke.Color = T.accent2 end)
+terminateBtn.MouseLeave:Connect(function() killStroke.Color = Color3.fromRGB(60, 70, 190) end)
 
 -- RIGHT COLUMN: NODE + CLEAR NODE CARDS
 local function createCard(title, y, height)
     local card = Instance.new("Frame")
     card.Size = UDim2.new(0, 244, 0, height)
-    card.Position = UDim2.new(0, 604, 0, y)
+    card.Position = UDim2.new(0, RIGHT_COL_X, 0, y)
     card.BackgroundColor3 = T.panel
     card.BorderSizePixel = 0
     card.Parent = body
@@ -2330,7 +2558,7 @@ UI.nodeTotalLabel = makeText(nodeCard, "0", 16, Color3.fromRGB(60, 225, 205), En
 UI.nodeTotalLabel.Size = UDim2.new(0, 100, 0, 20)
 UI.nodeTotalLabel.Position = UDim2.new(0, 128, 0, 144)
 
-local clearCard = createCard("Clear Node", 276, 212)
+local clearCard = createCard("Clear Node", 276, 252)
 
 local statusTitle = makeText(clearCard, "Status", 12, T.muted, Enum.Font.Gotham)
 statusTitle.Size = UDim2.new(0, 120, 0, 16)
@@ -2474,6 +2702,7 @@ local function setMinimized(state)
     else
         if UI.miniIcon then UI.miniIcon.Visible = false end
         mainFrame.Visible = true
+        UI.popIn()
     end
 end
 minimizeBtn.MouseButton1Click:Connect(function() setMinimized(not isUIMinimized) end)
@@ -2496,22 +2725,8 @@ end
 UI.autoHideRow.MouseButton1Click:Connect(toggleAutoHide)
 UI.autoHideQuickBtn.MouseButton1Click:Connect(toggleAutoHide)
 UI.refreshAutoHideBtns()
--- auto hide: whenever the window is open with the toggle ON, it minimizes 2 seconds later (every time it is reopened)
-task.spawn(function()
-    local shownSince
-    while not isCleaningUp do
-        if SETTINGS.AutoHideUI and not isUIMinimized then
-            shownSince = shownSince or os.clock()
-            if os.clock() - shownSince >= 2 then
-                shownSince = nil
-                setMinimized(true)
-            end
-        else
-            shownSince = nil
-        end
-        task.wait(0.25)
-    end
-end)
+-- Auto Hide UI only minimizes the window right when the script executes (Run Script, or auto-resume on load) -
+-- see the RUN SCRIPT handler below and loadConfigAndAutoExecute(). Simply reopening the menu never re-hides it.
 
 local isUIMaximized = false
 maximizeBtn.MouseButton1Click:Connect(function()
@@ -2521,6 +2736,50 @@ maximizeBtn.MouseButton1Click:Connect(function()
     uiScale.Scale = isUIMaximized and math.max(bigger, UI.baseScale) or UI.baseScale
     macroScroll.Visible = false
 end)
+
+-- RESIZE HANDLE: drag the bottom-right corner to freely make the whole window bigger or smaller
+local resizeHandle = Instance.new("TextButton")
+resizeHandle.Size = UDim2.new(0, 22, 0, 22)
+resizeHandle.AnchorPoint = Vector2.new(1, 1)
+resizeHandle.Position = UDim2.new(1, -2, 1, -2)
+resizeHandle.BackgroundTransparency = 1
+resizeHandle.Text = "◢"
+resizeHandle.TextColor3 = T.muted
+resizeHandle.Font = Enum.Font.GothamBold
+resizeHandle.TextSize = 16
+resizeHandle.AutoButtonColor = false
+resizeHandle.ZIndex = 50
+resizeHandle.Parent = mainFrame
+resizeHandle.MouseEnter:Connect(function() resizeHandle.TextColor3 = T.accent end)
+resizeHandle.MouseLeave:Connect(function() resizeHandle.TextColor3 = T.muted end)
+
+local isResizing, resizeStartPos, resizeStartScale = false, Vector2.zero, UI.baseScale
+local function applyResizeDrag(cur)
+    local delta = cur - resizeStartPos
+    local drag = (delta.X + delta.Y) / 2
+    uiScale.Scale = math.clamp(resizeStartScale + drag / 420, 0.4, 1.6)
+    isUIMaximized = false
+end
+resizeHandle.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        isResizing = true
+        resizeStartScale = uiScale.Scale
+        resizeStartPos = (input.UserInputType == Enum.UserInputType.Touch) and Vector2.new(input.Position.X, input.Position.Y) or UserInputService:GetMouseLocation()
+    end
+end)
+table.insert(connections, RunService.RenderStepped:Connect(function()
+    if isResizing then applyResizeDrag(UserInputService:GetMouseLocation()) end
+end))
+table.insert(connections, UserInputService.InputChanged:Connect(function(input)
+    if isResizing and input.UserInputType == Enum.UserInputType.Touch then
+        applyResizeDrag(Vector2.new(input.Position.X, input.Position.Y))
+    end
+end))
+table.insert(connections, UserInputService.InputEnded:Connect(function(input)
+    if isResizing and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+        isResizing = false
+    end
+end))
 
 closeBtn.MouseButton1Click:Connect(function() cleanup() end)
 
@@ -2796,7 +3055,11 @@ runMacroBtn.MouseButton1Click:Connect(function()
     saveConfig()
 end)
 
-terminateBtn.MouseButton1Click:Connect(cleanup)
+terminateBtn.MouseButton1Click:Connect(function()
+    setClipboard(DISCORD_INVITE)
+    terminateBtn.Text = "Copied!"
+    task.delay(1.5, function() if terminateBtn.Parent then terminateBtn.Text = "💬  Discord" end end)
+end)
 end
 
 -- 5. LOAD CONFIG AND AUTO-EXECUTE
@@ -2833,6 +3096,16 @@ SETTINGS.LobbyMap = cfg.LobbyMap or SETTINGS.LobbyMap
 SETTINGS.LobbyDifficulty = cfg.LobbyDifficulty or SETTINGS.LobbyDifficulty
 SETTINGS.LobbyHardcore = cfg.LobbyHardcore or false
 SETTINGS.LobbyPrivate = cfg.LobbyPrivate or false
+SETTINGS.FollowHost = cfg.FollowHost or false
+if UI.followHostRow then
+    UI.followHostRow.Text = "Follow Host: " .. (SETTINGS.FollowHost and "ON" or "OFF")
+    UI.followHostRow.BackgroundColor3 = SETTINGS.FollowHost and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
+end
+if cfg.AutoCreateLobby ~= nil then SETTINGS.AutoCreateLobby = cfg.AutoCreateLobby end
+if UI.autoCreateLobbyRow then
+    UI.autoCreateLobbyRow.Text = "Auto Create Lobby: " .. (SETTINGS.AutoCreateLobby and "ON" or "OFF")
+    UI.autoCreateLobbyRow.BackgroundColor3 = SETTINGS.AutoCreateLobby and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
+end
 SETTINGS.TargetPartySize = cfg.TargetPartySize or 0
 if cfg.WaitForPlayers ~= nil then SETTINGS.WaitForPlayers = cfg.WaitForPlayers end
 if cfg.AutoDodgeEnabled ~= nil then SETTINGS.AutoDodgeEnabled = cfg.AutoDodgeEnabled end
@@ -2853,6 +3126,11 @@ if cfg.RenameParty ~= nil then SETTINGS.RenameParty = cfg.RenameParty end
 SETTINGS.LogoAvatar = true -- icon is fixed; only the username can be changed
 if cfg.AutoTrade ~= nil then SETTINGS.AutoTrade = cfg.AutoTrade end
 if cfg.AutoAcceptTrade ~= nil then SETTINGS.AutoAcceptTrade = cfg.AutoAcceptTrade end
+if cfg.AutoAcceptRequireGold ~= nil then SETTINGS.AutoAcceptRequireGold = cfg.AutoAcceptRequireGold end
+if UI.requireGoldRow then
+    UI.requireGoldRow.Text = "Skip Trade if Gold is 0: " .. (SETTINGS.AutoAcceptRequireGold and "ON" or "OFF")
+    UI.requireGoldRow.BackgroundColor3 = SETTINGS.AutoAcceptRequireGold and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
+end
 if cfg.AcceptUsername ~= nil then SETTINGS.AcceptUsername = tostring(cfg.AcceptUsername) end
 if cfg.TradeUsername ~= nil then SETTINGS.TradeUsername = tostring(cfg.TradeUsername) end
 SETTINGS.AutoSellEnabled = cfg.AutoSellEnabled or false
@@ -2999,6 +3277,9 @@ if success and type(cfg) == "table" then
         if UI.runMacroBtn then
             UI.runMacroBtn.Text = "■  STOP AUTOPLAY"
             UI.runMacroBtn.BackgroundColor3 = UI.theme.pink
+        end
+        if SETTINGS.AutoHideUI and UI.setMinimized then
+            task.delay(2, function() if isAutoplay then UI.setMinimized(true) end end)
         end
     end
 end
@@ -3362,23 +3643,55 @@ end
 return false
 end
 
+-- Target choice: nearest enemy, but enemies behind walls count as 15 studs farther, and the current target keeps an
+-- 8 stud bonus so the script does not flip between two enemies at similar range. Rescans every 0.15 s.
+local function isUsableTarget(mob)
+    if not mob or not mob.Parent or mob == character or isIgnoredEnemy(mob) then return false end
+    local hum = mob:FindFirstChildOfClass("Humanoid")
+    return hum ~= nil and hum.Health > 0 and mob:FindFirstChild("HumanoidRootPart") ~= nil
+end
+
 local function findBestTarget()
-local closestMob, shortestDist = nil, math.huge
-for hum, _ in pairs(trackedHumanoids) do
-if hum and hum.Parent and hum.Health > 0 then
-local mob = hum.Parent
-if mob:IsA("Model") and mob ~= character and not Players:GetPlayerFromCharacter(mob) and not isIgnoredEnemy(mob) then
-local mobRoot = mob:FindFirstChild("HumanoidRootPart") or mob.PrimaryPart
-if mobRoot then
-local dist = (mobRoot.Position - rootPart.Position).Magnitude
-if dist < shortestDist then shortestDist = dist; closestMob = mob end
-end
-end
-elseif not hum or not hum.Parent then
-trackedHumanoids[hum] = nil
-end
-end
-return closestMob
+    local now = os.clock()
+    local current = UI.currentTarget
+    if current and not isUsableTarget(current) then current = nil; UI.currentTarget = nil end
+    if current and now - (UI.lastTargetScan or 0) < 0.15 then return current end
+    UI.lastTargetScan = now
+
+    local origin = rootPart.Position
+    local candidates = {}
+    for hum, _ in pairs(trackedHumanoids) do
+        if hum and hum.Parent and hum.Health > 0 then
+            local mob = hum.Parent
+            if mob:IsA("Model") and mob ~= character and not Players:GetPlayerFromCharacter(mob) and not isIgnoredEnemy(mob) then
+                local mobRoot = mob:FindFirstChild("HumanoidRootPart")
+                if mobRoot then table.insert(candidates, { mob = mob, pos = mobRoot.Position }) end
+            end
+        elseif not hum or not hum.Parent then
+            trackedHumanoids[hum] = nil
+        end
+    end
+
+    -- score = distance, -5 per pack mate within 22 studs (max 4), +6 behind a wall, -8 for the current target.
+    -- The pack bonus makes it walk to the group instead of picking off one loose enemy.
+    local best, bestScore = nil, math.huge
+    for _, c in ipairs(candidates) do
+        local dist = (c.pos - origin).Magnitude
+        local score = dist
+        if dist < 90 then
+            local hit = Workspace:Raycast(origin + Vector3.new(0, 1.8, 0), c.pos - origin, raycastParams)
+            if hit and hit.Instance and hit.Instance.CanCollide and not hit.Instance:IsDescendantOf(c.mob) then score = score + 6 end
+        end
+        local mates = 0
+        for _, o in ipairs(candidates) do
+            if o ~= c and (o.pos - c.pos).Magnitude <= 22 then mates = mates + 1 end
+        end
+        score = score - math.min(mates, 4) * 5
+        if c.mob == current then score = score - 8 end
+        if score < bestScore then bestScore = score; best = c.mob end
+    end
+    UI.currentTarget = best
+    return best
 end
 
 -- Target attack indicators and spell zones
@@ -3396,6 +3709,16 @@ if isDecoration(obj) then return 0 end
 
 local score = 0
 local name = obj.Name:lower()
+
+-- lightning / beam style attacks: a neon part of any color that appeared during the fight and is long and thin
+local born = UI.partBorn and UI.partBorn[obj]
+if born and os.clock() - born < 15 and obj.Material == Enum.Material.Neon and obj.Transparency < 1 then
+    local sz = obj.Size
+    if math.max(sz.X, sz.Y, sz.Z) >= 10 and math.min(sz.X, sz.Y, sz.Z) <= 8 then
+        local model = obj:FindFirstAncestorOfClass("Model")
+        if not (model and model:FindFirstChildOfClass("Humanoid")) then score = score + 3 end
+    end
+end
 
 for _, kw in ipairs(HAZARD_KEYWORDS) do 
     if name:find(kw) then score = score + 3; break end 
@@ -3460,7 +3783,16 @@ end
 end
 end
 
+-- attacks that appear DURING the fight (lightning beams etc.): remember when parts were created and track Beam objects.
+-- Everything that already exists when the script starts is treated as map scenery and ignored by this.
+UI.partBorn = setmetatable({}, { __mode = "k" })
+UI.activeBeams = setmetatable({}, { __mode = "k" })
+
 local function onDescendantAdded(child)
+if UI.initialScanDone then
+    if child:IsA("BasePart") then UI.partBorn[child] = os.clock() end
+    if child:IsA("Beam") then UI.activeBeams[child] = true end
+end
 if child.Name == "Terrain" or child.Name == "Baseplate" or child:IsA("Camera") then return end
 handleInviswall(child)
 if child:IsA("BasePart") then
@@ -3489,6 +3821,7 @@ end
 end
 end))
 for _, child in ipairs(Workspace:GetChildren()) do onDescendantAdded(child) end
+UI.initialScanDone = true
 
 local function getDangerousHazards(playerPos)
 local hazards = {}
@@ -3527,6 +3860,20 @@ for part, _ in pairs(activeHazards) do
         end
     else
         cleanupPartConnections(part); activeHazards[part] = nil; hazardTracking[part] = nil
+    end
+end
+-- Beam objects created during the fight become a box along the beam (width x 8 tall x length)
+for beam in pairs(UI.activeBeams) do
+    if not beam.Parent then
+        UI.activeBeams[beam] = nil
+    elseif beam.Enabled and beam.Attachment0 and beam.Attachment1
+        and not isPlayerOrTeammatePart(beam.Attachment0.Parent) and not isPlayerOrTeammatePart(beam.Attachment1.Parent) then
+        local a, b = beam.Attachment0.WorldPosition, beam.Attachment1.WorldPosition
+        local len = (b - a).Magnitude
+        if len > 6 and len < 250 and (a - playerPos).Magnitude < 260 then
+            local width = math.max(beam.Width0, beam.Width1, 4)
+            table.insert(hazards, { cframe = CFrame.lookAt((a + b) / 2, b), size = Vector3.new(width, 8, len), name = "Beam", velocity = Vector3.zero, shape = "Box" })
+        end
     end
 end
 return hazards
@@ -3658,6 +4005,15 @@ function UI.findDodgePoint(playerPos, enemyPos, hazards)
         if not isPointInDanger(playerPos, { h }, 0) then table.insert(others, h) end
     end
     local bestExit, bestExitClearance = nil, -math.huge
+    local hasEnemy = (enemyPos - playerPos).Magnitude > 0.5
+    -- dodging should not drag you out of attack range or into the enemy's face
+    local function rangePenalty(pos)
+        if not hasEnemy then return 0 end
+        local d = (pos - enemyPos).Magnitude
+        if d > SETTINGS.AttackReach then return (d - SETTINGS.AttackReach) * 0.5 end
+        if d < SETTINGS.MinDistance then return (SETTINGS.MinDistance - d) * 0.4 end
+        return 0
+    end
     for pass = 1, 2 do
         local margin = (pass == 1) and 2 or 0
         local best, bestScore = nil, math.huge
@@ -3666,7 +4022,7 @@ function UI.findDodgePoint(playerPos, enemyPos, hazards)
                 local candidate = playerPos + dir * dist
                 local inDanger, _, _, clearance = isPointInDanger(candidate, hazards, margin)
                 if not inDanger then
-                    local score = (dist <= 8 and -45 or 0) - math.min(clearance, 12) + dist * 0.35 + math.abs((candidate - enemyPos).Magnitude - idealCombatDist) * 0.04
+                    local score = (dist <= 8 and -45 or 0) - math.min(clearance, 12) + dist * 0.35 + math.abs((candidate - enemyPos).Magnitude - idealCombatDist) * 0.04 + rangePenalty(candidate)
                     if score < bestScore and (pass == 2 or not UI.isPathBlocked(playerPos, candidate, others, 0)) and isValidTeleport(playerPos, candidate) then
                         best, bestScore = candidate, score
                     end
@@ -3679,6 +4035,21 @@ function UI.findDodgePoint(playerPos, enemyPos, hazards)
     end
     if bestExit and isValidTeleport(playerPos, bestExit) then return bestExit end
     return nil
+end
+
+-- Backpedal spot: straight away from the enemy, or 40 / 80 degrees to either side when a wall or an attack zone is there.
+function UI.pickRetreatPos(playerPos, enemyPos, hazards)
+    local away = Vector3.new(playerPos.X - enemyPos.X, 0, playerPos.Z - enemyPos.Z)
+    if away.Magnitude < 0.1 then away = Vector3.new(1, 0, 0) end
+    away = away.Unit
+    for _, deg in ipairs({ 0, 40, -40, 80, -80 }) do
+        local dir = CFrame.Angles(0, math.rad(deg), 0) * away
+        local pos = playerPos + dir * 6
+        local wall = Workspace:Raycast(playerPos + Vector3.new(0, 1.5, 0), dir * 7, raycastParams)
+        local blocked = wall and wall.Instance and wall.Instance.CanCollide and math.abs(wall.Normal.Y) < 0.7
+        if not blocked and not isPointInDanger(pos, hazards, 0) then return pos end
+    end
+    return playerPos + away * 6
 end
 
 -- MoveTo that will not walk you into an attack zone: if the next ~14 studs of the route cross one it waits
@@ -3726,8 +4097,32 @@ if isInLobby() then
     -- release the facing lock in the lobby so the player can turn freely
     if alignOrient and alignOrient.Enabled then alignOrient.Enabled = false end
     if humanoid and not humanoid.AutoRotate then humanoid.AutoRotate = true end
+    UI.hostSeen, UI.hostMissingSince = false, nil
     handleLobbyAutomation()
-    return 
+    return
+end
+
+-- FOLLOW HOST: once the host has been in this dungeon, leave to the lobby 3 s after they disappear from the server
+if SETTINGS.FollowHost and SETTINGS.JoinPlayerName ~= "" then
+    local hostName = SETTINGS.JoinPlayerName:lower()
+    local hostHere = false
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p.Name:lower() == hostName or p.DisplayName:lower() == hostName then hostHere = true; break end
+    end
+    if hostHere then
+        UI.hostSeen, UI.hostMissingSince = true, nil
+    elseif UI.hostSeen then
+        UI.hostMissingSince = UI.hostMissingSince or os.clock()
+        if os.clock() - UI.hostMissingSince >= 3 then
+            UI.hostSeen, UI.hostMissingSince = false, nil
+            setStatus("Status: Host left - leaving game...", true)
+            pcall(function()
+                local remotes = ReplicatedStorage:FindFirstChild("remotes")
+                safeInvoke(remotes and remotes:FindFirstChild("ReturnToLobbyEvent"))
+            end)
+            return
+        end
+    end
 end
 
 -- Enforce AutoRotate state on every frame to prevent animation overrides
@@ -3742,7 +4137,7 @@ local now = os.clock()
 local othersInServer = #Players:GetPlayers() - 1
 local currentlyWaitingForPlayers = false
 
-if SETTINGS.LobbyMode == "Host" and SETTINGS.TargetPartySize > 0 then
+if SETTINGS.LobbyMode == "Host" and not SETTINGS.FollowHost and SETTINGS.TargetPartySize > 0 then
     if othersInServer >= SETTINGS.TargetPartySize then partyWasFull = true end
     if othersInServer < SETTINGS.TargetPartySize and not partyWasFull and SETTINGS.WaitForPlayers then
         currentlyWaitingForPlayers = true
@@ -3762,7 +4157,7 @@ if currentlyWaitingForPlayers then
     return
 end
 
-if SETTINGS.LobbyMode == "Host" then
+if SETTINGS.LobbyMode == "Host" and not SETTINGS.FollowHost then
     if now - lastStartValueTime > 3.0 then
         lastStartValueTime = now
         pcall(function()
@@ -3777,6 +4172,12 @@ end
 
 if not humanoid or humanoid.Health <= 0 or not rootPart or isDodgeBlinking or hasReturnedToLobby then return end
 local playerPos = rootPart.Position
+
+-- in-game auto sell: every 8 s, sells the rarities ticked in the Auto Sell tab (before the inventory-full check)
+if SETTINGS.AutoSellEnabled and now - (UI.lastAutoSell or 0) > 8.0 then
+    UI.lastAutoSell = now
+    pcall(executeAutoSell, true)
+end
 
 if now - lastInvCheckTime > 3.0 then
     lastInvCheckTime = now
@@ -4010,15 +4411,17 @@ if activeTarget and activeTarget:FindFirstChild("HumanoidRootPart") then
     local toEnemy = enemyPos - playerPos
     local flatToEnemy = Vector3.new(toEnemy.X, 0, toEnemy.Z)
     local distToEnemy = flatToEnemy.Magnitude
+    -- a wall between you and the enemy means you cannot hit it, so standing still there is pointless
+    local clearRay = Workspace:Raycast(playerPos + Vector3.new(0, 1.8, 0), toEnemy, raycastParams)
+    local clearShot = (not clearRay) or (not clearRay.Instance.CanCollide) or clearRay.Instance:IsDescendantOf(activeTarget)
 
-    if distToEnemy <= SETTINGS.MaxDistance then
+    if distToEnemy <= SETTINGS.MaxDistance and clearShot then
         table.clear(activePathWaypoints)
         pathIndex = 1
 
         if distToEnemy < SETTINGS.MinDistance then 
             -- Smoothly backpedal away from target if they get too close
-            local retreatDir = (playerPos - enemyPos).Unit
-            local retreatPos = playerPos + Vector3.new(retreatDir.X, 0, retreatDir.Z).Unit * 6
+            local retreatPos = UI.pickRetreatPos(playerPos, enemyPos, hazards)
             UI.moveAvoiding(getGlidedTargetPos(playerPos, retreatPos), hazards)
         else
             -- In combat zone: stand ground and cast cleanly
@@ -4227,6 +4630,30 @@ function UI.clickAcceptButton()
     if not shown(btn) then return true, "accepted" end
     return false, ok and "clicked Accept but the popup is still open" or "could not click Accept"
 end
+-- Reads the gold amount shown on the incoming trade offer (best-effort: looks for a number label whose name or a
+-- parent's name mentions "gold" inside the same PlayerGui). Returns nil if no such label could be found.
+local function getIncomingTradeGold()
+    local pGui = player:FindFirstChild("PlayerGui")
+    if not pGui then return nil end
+    for _, obj in ipairs(pGui:GetDescendants()) do
+        if (obj:IsA("TextLabel") or obj:IsA("TextButton")) and obj.AbsoluteSize.X > 0 and not (UI.screenGui and obj:IsDescendantOf(UI.screenGui)) then
+            local value = obj.Text:match("^%s*([%d%.,]+%s*[KMBTkmbt]?)%s*$")
+            if value then
+                local current = obj
+                for _ = 1, 4 do
+                    if not current or current == pGui then break end
+                    if current.Name:lower():find("gold", 1, true) then
+                        local num = tonumber((value:gsub("[^%d%.]", "")))
+                        if num then return num end
+                    end
+                    current = current.Parent
+                end
+            end
+        end
+    end
+    return nil
+end
+
 -- AUTO ACCEPT TRADE: listens to the game's incoming-trade remote(s) and answers "accept" (same pattern as the join-request hook).
 function UI.startAutoAccept()
     task.spawn(function()
@@ -4264,6 +4691,14 @@ function UI.startAutoAccept()
                     end
                     pcall(warn, "[Trade] incoming via " .. r.Name .. ": " .. tostring(args[1]) .. ", " .. tostring(args[2]))
                     task.wait(0.3)
+                    if SETTINGS.AutoAcceptRequireGold then
+                        local offeredGold = getIncomingTradeGold()
+                        pcall(warn, "[Trade] offered gold detected: " .. tostring(offeredGold))
+                        if offeredGold ~= nil and offeredGold <= 0 then
+                            setAccept("skipped trade from " .. who .. " (0 gold offered)")
+                            return
+                        end
+                    end
                     local clicked, info = UI.clickAcceptButton()
                     if clicked then
                         setAccept(info .. " request from " .. who)
@@ -4277,6 +4712,36 @@ function UI.startAutoAccept()
             end
         end
         if #list == 0 then setAccept("no trade remotes found") end
+    end)
+end
+
+-- AUTO ACCEPT JOIN REQUESTS (backup): when the "... wants to join your raid" popup is on screen and you are the host,
+-- press its ACCEPT button. Works even if the game's remote did not reach the hook above.
+function UI.startJoinAccept()
+    task.spawn(function()
+        local lastTry = 0
+        while not isCleaningUp do
+            task.wait(0.1)
+            if isAutoplay and SETTINGS.LobbyMode == "Host" and not SETTINGS.FollowHost and os.clock() - lastTry > 0.5 then
+                local pGui = player:FindFirstChild("PlayerGui")
+                local found = false
+                for _, obj in ipairs(pGui and pGui:GetDescendants() or {}) do
+                    if obj:IsA("TextLabel") and obj.Text:lower():find("wants to join", 1, true) and obj.AbsoluteSize.X > 0 then
+                        local shown, cur = true, obj
+                        while cur and cur ~= pGui do
+                            if (cur:IsA("GuiObject") and not cur.Visible) or (cur:IsA("ScreenGui") and not cur.Enabled) then shown = false break end
+                            cur = cur.Parent
+                        end
+                        if shown then found = true; break end
+                    end
+                end
+                if found then
+                    lastTry = os.clock()
+                    local ok, clicked, info = pcall(UI.clickAcceptButton)
+                    pcall(warn, "[Join] popup found, accept -> " .. tostring(ok and clicked) .. " " .. tostring(info))
+                end
+            end
+        end
     end)
 end
 
@@ -4476,7 +4941,7 @@ local KEY = {
     Required = true,
     Keys = { "NCLHUB" },                        -- valid keys: edit / add your own
     Url = "",                                   -- optional: link to a text file with one key per line (overrides Keys)
-    Discord = "https://discord.gg/sGJ3brqcJu",  -- copied to the clipboard by the Join Discord button
+    Discord = DISCORD_INVITE,  -- copied to the clipboard by the Join Discord button
     File = FOLDER_NAME .. "/key.txt",
 }
 
@@ -4690,4 +5155,5 @@ showKeySystem(function()
     loadConfigAndAutoExecute()
     UI.startAutoTrade()
     UI.startAutoAccept()
+    UI.startJoinAccept()
 end)
