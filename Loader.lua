@@ -1418,6 +1418,9 @@ local function applyBoostFPS(enabled, skipSave)
         UI.boostFpsRow.Text = "Boost FPS: " .. (SETTINGS.BoostFPS and "ON" or "OFF")
         UI.boostFpsRow.BackgroundColor3 = SETTINGS.BoostFPS and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
     end
+    if UI.boostFpsQuickBtn then
+        UI.boostFpsQuickBtn.BackgroundColor3 = SETTINGS.BoostFPS and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(13, 17, 33)
+    end
     setStatus(SETTINGS.BoostFPS and "Status: Boost FPS ON" or "Status: Boost FPS OFF", true)
     if not skipSave then saveConfig() end
 end
@@ -1709,7 +1712,14 @@ UI.autoHideQuickBtn.Font = Enum.Font.GothamBold
 UI.autoHideQuickBtn.TextSize = 15
 UI.autoHideQuickBtn.TextColor3 = T.text
 UI.autoHideQuickBtn.Text = "👁"
-statusLabel.Size = UDim2.new(0, 200, 1, 0)
+
+UI.boostFpsQuickBtn = makeWindowButton(580)
+UI.boostFpsQuickBtn.Font = Enum.Font.GothamBold
+UI.boostFpsQuickBtn.TextSize = 12
+UI.boostFpsQuickBtn.TextColor3 = T.text
+UI.boostFpsQuickBtn.Text = "FPS"
+UI.boostFpsQuickBtn.BackgroundColor3 = SETTINGS.BoostFPS and Color3.fromRGB(40, 150, 70) or T.field
+statusLabel.Size = UDim2.new(0, 158, 1, 0)
 
 local minimizeBtn = makeWindowButton(706)
 makeBar(minimizeBtn, 14, 2)
@@ -3010,6 +3020,9 @@ UI.blackScreenQuickBtn.MouseButton1Click:Connect(function()
     applyBlackScreen(not SETTINGS.BlackScreen)
 end)
 UI.boostFpsRow.MouseButton1Click:Connect(function()
+    applyBoostFPS(not SETTINGS.BoostFPS)
+end)
+UI.boostFpsQuickBtn.MouseButton1Click:Connect(function()
     applyBoostFPS(not SETTINGS.BoostFPS)
 end)
 UI.maxFpsInput.FocusLost:Connect(function()
