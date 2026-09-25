@@ -120,6 +120,8 @@ local SETTINGS = {
     BlackScreen = false,
     ShowRangeCircle = false,
     AutoHideUI = false,
+    BoostFPS = false,
+    MaxFPS = 60,
     CustomName = "",
     RenameParty = true,
     LogoAvatar = true,
@@ -470,9 +472,9 @@ task.spawn(function()
         return
     end
 
-    if not SETTINGS.AutoLobbyEnabled then 
+    if not SETTINGS.AutoLobbyEnabled and not SETTINGS.FollowHost then
         isHandlingLobbyRoutine = false
-        return 
+        return
     end
 
     local remotes = ReplicatedStorage:WaitForChild("remotes", 5)
@@ -1056,6 +1058,8 @@ AutoDodgeEnabled = SETTINGS.AutoDodgeEnabled,
 BlackScreen = SETTINGS.BlackScreen,
 ShowRangeCircle = SETTINGS.ShowRangeCircle,
 AutoHideUI = SETTINGS.AutoHideUI,
+BoostFPS = SETTINGS.BoostFPS,
+MaxFPS = SETTINGS.MaxFPS,
 CustomName = SETTINGS.CustomName,
 RenameParty = SETTINGS.RenameParty,
 LogoAvatar = SETTINGS.LogoAvatar,
@@ -1345,6 +1349,102 @@ local function applyBlackScreen(enabled, skipSave)
     if not skipSave then saveConfig() end
 end
 UI.applyBlackScreen = applyBlackScreen
+
+-- BOOST FPS: lowers rendering quality/effects so the client has less to draw each frame
+local RENDER_BACKUP = {}
+local boostedEffects = setmetatable({}, {__mode = "k"})
+local boostFpsConnection
+
+local function isEffectInstance(obj)
+    return obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam") or obj:IsA("Smoke") or obj:IsA("Fire") or obj:IsA("Sparkles")
+end
+
+local function applyBoostFPS(enabled, skipSave)
+    SETTINGS.BoostFPS = enabled and true or false
+
+    pcall(function()
+        local Lighting = game:GetService("Lighting")
+        if SETTINGS.BoostFPS then
+            RENDER_BACKUP.GlobalShadows = Lighting.GlobalShadows
+            RENDER_BACKUP.FogEnd = Lighting.FogEnd
+            Lighting.GlobalShadows = false
+            Lighting.FogEnd = 100000
+        elseif RENDER_BACKUP.GlobalShadows ~= nil then
+            Lighting.GlobalShadows = RENDER_BACKUP.GlobalShadows
+            Lighting.FogEnd = RENDER_BACKUP.FogEnd
+        end
+    end)
+
+    pcall(function()
+        settings().Rendering.QualityLevel = SETTINGS.BoostFPS and Enum.QualityLevel.Level01 or Enum.QualityLevel.Automatic
+    end)
+
+    pcall(function()
+        local terrain = Workspace:FindFirstChildOfClass("Terrain")
+        if terrain then
+            terrain.Decoration = not SETTINGS.BoostFPS
+            terrain.WaterWaveSize = SETTINGS.BoostFPS and 0 or 0.15
+            terrain.WaterWaveSpeed = SETTINGS.BoostFPS and 0 or 10
+            terrain.WaterReflectance = SETTINGS.BoostFPS and 0 or 0.25
+        end
+    end)
+
+    pcall(function()
+        for _, obj in ipairs(Workspace:GetDescendants()) do
+            if isEffectInstance(obj) then
+                if SETTINGS.BoostFPS then
+                    if boostedEffects[obj] == nil then boostedEffects[obj] = obj.Enabled end
+                    obj.Enabled = false
+                elseif boostedEffects[obj] ~= nil then
+                    obj.Enabled = boostedEffects[obj]
+                    boostedEffects[obj] = nil
+                end
+            end
+        end
+    end)
+
+    if boostFpsConnection then boostFpsConnection:Disconnect(); boostFpsConnection = nil end
+    if SETTINGS.BoostFPS then
+        boostFpsConnection = Workspace.DescendantAdded:Connect(function(obj)
+            if isEffectInstance(obj) then
+                if boostedEffects[obj] == nil then boostedEffects[obj] = obj.Enabled end
+                obj.Enabled = false
+            end
+        end)
+        table.insert(connections, boostFpsConnection)
+    end
+
+    if UI.boostFpsRow then
+        UI.boostFpsRow.Text = "Boost FPS: " .. (SETTINGS.BoostFPS and "ON" or "OFF")
+        UI.boostFpsRow.BackgroundColor3 = SETTINGS.BoostFPS and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
+    end
+    setStatus(SETTINGS.BoostFPS and "Status: Boost FPS ON" or "Status: Boost FPS OFF", true)
+    if not skipSave then saveConfig() end
+end
+UI.applyBoostFPS = applyBoostFPS
+
+-- MAX FPS: caps the client framerate via whatever fps-cap function the executor exposes (0 = unlimited)
+local function getFpsCapSetter()
+    return setfpscap or set_fps_cap or setfpscap_v2 or (fluxus and fluxus.set_fps_cap)
+end
+
+local function applyMaxFps(value, skipSave)
+    value = tonumber(value) or SETTINGS.MaxFPS
+    if value < 0 then value = 0 end
+    SETTINGS.MaxFPS = value
+
+    local setter = getFpsCapSetter()
+    if setter then
+        local ok = pcall(setter, value <= 0 and 9999 or value)
+        setStatus(ok and ("Status: Max FPS set to " .. (value <= 0 and "Unlimited" or tostring(value))) or "Max FPS: your executor rejected the fps cap.", true)
+    else
+        setStatus("Max FPS: your executor has no setfpscap function - cap not changed.", true)
+    end
+
+    if UI.maxFpsInput then UI.maxFpsInput.Text = tostring(SETTINGS.MaxFPS) end
+    if not skipSave then saveConfig() end
+end
+UI.applyMaxFps = applyMaxFps
 
 -- LOGO MARK: uses "dungeonmacros/logo.png" (executor workspace) if present, else a bold slanted gradient "N".
 local function createLogoMark(parent, zIndex)
@@ -1862,20 +1962,6 @@ local function MakeDropdownRow(labelText, getOptionsFunc, defaultVal, parent, ca
     return api
 end
 
-local function getAvailableMaps()
-    local maps = {}
-    pcall(function()
-        local scroll = findNested(player, "PlayerGui", "queueGui", "chooseDungeon", "backgroundFillLeft", "ScrollingFrame")
-        if scroll then
-            for _, child in ipairs(scroll:GetChildren()) do
-                if child:IsA("ImageLabel") then table.insert(maps, child.Name) end
-            end
-        end
-    end)
-    if #maps == 0 then return {"Desert Ruins", "Volcanic Chambers", "King's Castle", "Underworld", "Samurai Palace"} end
-    return maps
-end
-
 local function getAvailableDifficulties()
     local diffs = {}
     pcall(function()
@@ -2351,6 +2437,10 @@ UI.blackScreenRow = MakeToggle("Black Screen (RightCtrl): OFF", false, miscPage)
 UI.blackScreenRow.LayoutOrder = 103
 UI.autoHideRow = MakeToggle("Auto Hide UI: " .. (SETTINGS.AutoHideUI and "ON" or "OFF"), SETTINGS.AutoHideUI, miscPage)
 UI.autoHideRow.LayoutOrder = 104
+UI.boostFpsRow = MakeToggle("Boost FPS: " .. (SETTINGS.BoostFPS and "ON" or "OFF"), SETTINGS.BoostFPS, miscPage)
+UI.boostFpsRow.LayoutOrder = 105
+UI.maxFpsInput = MakeSettingRow("Max FPS (0 = unlimited):", SETTINGS.MaxFPS, miscPage)
+UI.maxFpsInput.Parent.LayoutOrder = 106
 UI.autoLobbyRow = MakeToggle("Auto Lobby Routine: " .. (SETTINGS.AutoLobbyEnabled and "ON" or "OFF"), SETTINGS.AutoLobbyEnabled, miscPage)
 UI.followHostRow = MakeToggle("Follow Host: " .. (SETTINGS.FollowHost and "ON" or "OFF"), SETTINGS.FollowHost, joinPage)
 UI.followHostRow.MouseButton1Click:Connect(function()
@@ -2377,15 +2467,10 @@ UI.autoCreateLobbyRow.MouseButton1Click:Connect(function()
     UI.autoCreateLobbyRow.BackgroundColor3 = SETTINGS.AutoCreateLobby and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
     saveConfig()
 end)
-local autoCreateNote = makeText(joinPage, "ON (Host role): creates a lobby with the Map Name and Difficulty below, then auto-starts it.", 12, T.muted, Enum.Font.Gotham)
+local autoCreateNote = makeText(joinPage, "ON (Host role): creates a lobby with the Difficulty below, then auto-starts it.", 12, T.muted, Enum.Font.Gotham)
 autoCreateNote.Size = UDim2.new(1, 0, 0, 30)
 autoCreateNote.TextWrapped = true
 autoCreateNote.TextYAlignment = Enum.TextYAlignment.Top
-
-UI.mapDropdown = MakeDropdownRow("Map Name:", getAvailableMaps, SETTINGS.LobbyMap, joinPage, function(val)
-    SETTINGS.LobbyMap = val
-    saveConfig()
-end)
 
 UI.diffDropdown = MakeDropdownRow("Difficulty:", getAvailableDifficulties, SETTINGS.LobbyDifficulty, joinPage, function(val)
     SETTINGS.LobbyDifficulty = val
@@ -2924,6 +3009,13 @@ end)
 UI.blackScreenQuickBtn.MouseButton1Click:Connect(function()
     applyBlackScreen(not SETTINGS.BlackScreen)
 end)
+UI.boostFpsRow.MouseButton1Click:Connect(function()
+    applyBoostFPS(not SETTINGS.BoostFPS)
+end)
+UI.maxFpsInput.FocusLost:Connect(function()
+    if isCleaningUp then return end
+    applyMaxFps(UI.maxFpsInput.Text)
+end)
 table.insert(connections, UserInputService.InputBegan:Connect(function(input, processed)
     if processed or isCleaningUp then return end
     if input.KeyCode == BLACKSCREEN_KEY then applyBlackScreen(not SETTINGS.BlackScreen) end
@@ -3121,6 +3213,8 @@ if UI.autoHideRow then
     UI.autoHideRow.BackgroundColor3 = SETTINGS.AutoHideUI and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
 end
 if UI.refreshAutoHideBtns then UI.refreshAutoHideBtns() end
+if cfg.BoostFPS ~= nil then applyBoostFPS(cfg.BoostFPS, true) end
+if cfg.MaxFPS ~= nil then applyMaxFps(cfg.MaxFPS, true) end
 if cfg.CustomName ~= nil then SETTINGS.CustomName = tostring(cfg.CustomName) end
 if cfg.RenameParty ~= nil then SETTINGS.RenameParty = cfg.RenameParty end
 SETTINGS.LogoAvatar = true -- icon is fixed; only the username can be changed
@@ -3192,7 +3286,6 @@ if UI.rejDiscRow then
     UI.rejDiscRow.BackgroundColor3 = SETTINGS.RejoinOnDisconnect and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
 end
 
-if UI.mapDropdown then UI.mapDropdown:SetValue(SETTINGS.LobbyMap) end
 if UI.diffDropdown then UI.diffDropdown:SetValue(SETTINGS.LobbyDifficulty) end
 if UI.autoSellToggleBtn then
     UI.autoSellToggleBtn.Text = "Auto Sell: " .. (SETTINGS.AutoSellEnabled and "ON" or "OFF")
