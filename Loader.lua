@@ -3798,7 +3798,7 @@ UI.dodgeBoostInput.FocusLost:Connect(function()
     if isCleaningUp then return end
     local val = tonumber(UI.dodgeBoostInput.Text)
     if val then
-        SETTINGS.DodgeBoostStuds = math.clamp(val, 0, 10)
+        SETTINGS.DodgeBoostStuds = math.clamp(val, 0, 20)
         UI.dodgeBoostInput.Text = tostring(SETTINGS.DodgeBoostStuds)
         UI.dodgeBoostPool = math.min(UI.dodgeBoostPool, SETTINGS.DodgeBoostStuds)
         saveConfig()
@@ -3812,6 +3812,13 @@ UI.partySizeInput.FocusLost:Connect(function() applySetting(UI.partySizeInput, "
 UI.roleRow.MouseButton1Click:Connect(function()
     SETTINGS.LobbyMode = (SETTINGS.LobbyMode == "Host") and "Join" or "Host"
     UI.roleRow.Text = "Lobby Role: " .. SETTINGS.LobbyMode:upper()
+    if SETTINGS.LobbyMode == "Host" and SETTINGS.FollowHost then
+        SETTINGS.FollowHost = false
+        if UI.followHostRow then
+            UI.followHostRow.Text = "Follow Host: OFF"
+            UI.followHostRow.BackgroundColor3 = Color3.fromRGB(28, 34, 62)
+        end
+    end
     saveConfig()
 end)
 
