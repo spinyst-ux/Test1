@@ -523,7 +523,9 @@ end
 
 local invSpaceLabel = findNested(pGui, "inventory", "mainBackground", "innerBackground", "rightSideFrame", "inventorySpace")
 if invSpaceLabel and invSpaceLabel:IsA("TextLabel") then
-    local rawNum = invSpaceLabel.Text:match("(%d+)")
+    -- must match "current/max" specifically (e.g. "285/300") -- a bare first-number match
+    -- can grab the wrong number (like the "300" cap itself) and falsely read as full.
+    local rawNum = invSpaceLabel.Text:match("(%d+)%s*/%s*%d+")
     if rawNum and tonumber(rawNum) then count = math.max(count, tonumber(rawNum)) end
 end
 return count
@@ -552,7 +554,10 @@ end
 local function checkInventoryFull()
 if hasReturnedToLobby then return end
 local currentCount = getInventoryCount()
-if currentCount >= MAX_INVENTORY_CAPACITY then returnToLobby() end
+if currentCount >= MAX_INVENTORY_CAPACITY then
+    pcall(warn, "[Autoplay] inventory read as " .. tostring(currentCount) .. "/" .. tostring(MAX_INVENTORY_CAPACITY) .. " -- returning to lobby & stopping autoplay")
+    returnToLobby()
+end
 end
 
 -- Leaves the current dungeon after the followed host disappears. Unlike returnToLobby(), this
