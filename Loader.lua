@@ -1895,7 +1895,13 @@ UI.autoHideQuickBtn.Font = Enum.Font.GothamBold
 UI.autoHideQuickBtn.TextSize = 15
 UI.autoHideQuickBtn.TextColor3 = T.text
 UI.autoHideQuickBtn.Text = "👁"
-statusLabel.Size = UDim2.new(0, 200, 1, 0)
+
+UI.fpsBoostQuickBtn = makeWindowButton(580)
+UI.fpsBoostQuickBtn.Font = Enum.Font.GothamBold
+UI.fpsBoostQuickBtn.TextSize = 15
+UI.fpsBoostQuickBtn.TextColor3 = T.text
+UI.fpsBoostQuickBtn.Text = "⚡"
+statusLabel.Size = UDim2.new(0, 172, 1, 0)
 
 local minimizeBtn = makeWindowButton(706)
 makeBar(minimizeBtn, 14, 2)
@@ -3877,6 +3883,9 @@ end)
 UI.fpsBoostRow.MouseButton1Click:Connect(function()
     if UI.applyFpsBoost then UI.applyFpsBoost(not SETTINGS.FpsBoost) end
 end)
+UI.fpsBoostQuickBtn.MouseButton1Click:Connect(function()
+    if UI.applyFpsBoost then UI.applyFpsBoost(not SETTINGS.FpsBoost) end
+end)
 
 UI.autoDodgeRow.MouseButton1Click:Connect(function()
     SETTINGS.AutoDodgeEnabled = not SETTINGS.AutoDodgeEnabled
@@ -5017,6 +5026,9 @@ function UI.refreshPerfRows()
             r[1].Text = r[2] .. (r[3] and "ON" or "OFF")
             r[1].BackgroundColor3 = r[3] and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
         end
+    end
+    if UI.fpsBoostQuickBtn then
+        UI.fpsBoostQuickBtn.BackgroundColor3 = SETTINGS.FpsBoost and Color3.fromRGB(40, 150, 70) or T.field
     end
 end
 
@@ -6724,21 +6736,7 @@ function UI.clickAcceptButton()
     end
     task.wait(0.4)
     if not shown(btn) then return true, "accepted" end
-
-    -- 2) real mouse click at the button's centre (the game may listen to raw input)
-    local ok = pcall(function()
-        local gui = btn:FindFirstAncestorOfClass("ScreenGui")
-        local inset = (gui and gui.IgnoreGuiInset) and Vector2.zero or game:GetService("GuiService"):GetGuiInset()
-        local pos = btn.AbsolutePosition + btn.AbsoluteSize / 2 + inset
-        VirtualInputManager:SendMouseMoveEvent(pos.X, pos.Y, game)
-        task.wait(0.05)
-        VirtualInputManager:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 0)
-        task.wait(0.06)
-        VirtualInputManager:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
-    end)
-    task.wait(0.4)
-    if not shown(btn) then return true, "accepted" end
-    return false, ok and "clicked Accept but the popup is still open" or "could not click Accept"
+    return false, "clicked Accept (via handlers) but the popup is still open"
 end
 -- Reads the gold amount shown on the incoming trade offer. The game shows it as a single label reading e.g.
 -- "0 Gold" or "1,234 Gold" (not a bare number), so we match that directly. Returns nil if no such label is found.
@@ -6807,20 +6805,7 @@ function UI.clickDeclineButton()
     end
     task.wait(0.4)
     if not shown(btn) then return true, "declined" end
-
-    local ok = pcall(function()
-        local gui = btn:FindFirstAncestorOfClass("ScreenGui")
-        local inset = (gui and gui.IgnoreGuiInset) and Vector2.zero or game:GetService("GuiService"):GetGuiInset()
-        local pos = btn.AbsolutePosition + btn.AbsoluteSize / 2 + inset
-        VirtualInputManager:SendMouseMoveEvent(pos.X, pos.Y, game)
-        task.wait(0.05)
-        VirtualInputManager:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 0)
-        task.wait(0.06)
-        VirtualInputManager:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
-    end)
-    task.wait(0.4)
-    if not shown(btn) then return true, "declined" end
-    return false, ok and "clicked Decline but the popup is still open" or "could not click Decline"
+    return false, "clicked Decline (via handlers) but the popup is still open"
 end
 
 -- AUTO ACCEPT TRADE: listens to the game's incoming-trade remote(s) and answers "accept" (same pattern as the join-request hook).
@@ -6885,31 +6870,173 @@ function UI.startAutoAccept()
     end)
 end
 
--- AUTO ACCEPT JOIN REQUESTS (backup): when the "... wants to join your raid" popup is on screen and you are the host,
--- press its ACCEPT button. Works even if the game's remote did not reach the hook above.
-function UI.startJoinAccept()
-    task.spawn(function()
-        local lastTry = 0
-        while not isCleaningUp do
-            task.wait(0.1)
-            if isAutoplay and SETTINGS.LobbyMode == "Host" and not SETTINGS.FollowHost and os.clock() - lastTry > 0.5 then
-                local pGui = player:FindFirstChild("PlayerGui")
-                local found = false
-                for _, obj in ipairs(pGui and pGui:GetDescendants() or {}) do
-                    if obj:IsA("TextLabel") and obj.Text:lower():find("wants to join", 1, true) and obj.AbsoluteSize.X > 0 then
-                        local shown, cur = true, obj
-                        while cur and cur ~= pGui do
-                            if (cur:IsA("GuiObject") and not cur.Visible) or (cur:IsA("ScreenGui") and not cur.Enabled) then shown = false break end
-                            cur = cur.Parent
-                        end
-                        if shown then found = true; break end
+-- AUTO ACCEPT JOIN REQUESTS (backup): when a "Join Request" card is on screen and you are the host, press its
+-- ACCEPT button - WITHOUT any simulated mouse/touch input (no VirtualInputManager, no mousemoveabs/mouse1click,
+-- no SendTouchEvent). Multiple cards can be stacked at once (mobile screenshot showed 3), so every pass presses
+-- ALL of them, not just the first. Pressing = firing the button's own Lua connections directly via
+-- getconnections/firesignal, which never moves a cursor or taps the screen. The remote-based hook above
+-- (showJoinRequest -> respondJoinRequest:FireServer) is the primary path and never touches the UI at all; this
+-- loop is purely the fallback for when that remote doesn't fire for some popups.
+local joinAcceptPressed = setmetatable({}, { __mode = "k" }) -- weak-keyed: entries drop once the button is destroyed
+function UI.pressJoinAcceptButtons()
+    local pGui = player:FindFirstChild("PlayerGui")
+    if not pGui then return 0 end
+    local function shown(obj)
+        local cur = obj
+        while cur and cur ~= pGui do
+            if cur:IsA("GuiObject") and not cur.Visible then return false end
+            if cur:IsA("ScreenGui") and not cur.Enabled then return false end
+            cur = cur.Parent
+        end
+        return obj.AbsoluteSize.X > 0 and obj.AbsoluteSize.Y > 0
+    end
+    local pressedCount = 0
+    for _, obj in ipairs(pGui:GetDescendants()) do
+        if obj:IsA("TextButton") and not joinAcceptPressed[obj] and shown(obj)
+            and obj.Text:lower():match("^%s*accept%s*$") then
+            -- only press ACCEPT buttons that belong to a "Join Request" / "wants to join" card, so we never
+            -- interfere with unrelated Accept buttons (e.g. the trade-accept feature)
+            local card, isJoinCard = obj.Parent, false
+            for _ = 1, 5 do
+                if not card or card == pGui then break end
+                for _, d in ipairs(card:GetDescendants()) do
+                    if d:IsA("TextLabel") then
+                        local t = d.Text:lower()
+                        if t:find("wants to join", 1, true) or t:find("join request", 1, true) then isJoinCard = true break end
                     end
                 end
-                if found then
-                    lastTry = os.clock()
-                    local ok, clicked, info = pcall(UI.clickAcceptButton)
-                    pcall(warn, "[Join] popup found, accept -> " .. tostring(ok and clicked) .. " " .. tostring(info))
+                if isJoinCard then break end
+                card = card.Parent
+            end
+            if isJoinCard then
+                local ok = pcall(function()
+                    if getconnections then
+                        for _, sig in ipairs({ obj.MouseButton1Click, obj.Activated }) do
+                            for _, c in ipairs(getconnections(sig)) do c:Fire() end
+                        end
+                    elseif firesignal then
+                        firesignal(obj.MouseButton1Click)
+                        firesignal(obj.Activated)
+                    end
+                end)
+                joinAcceptPressed[obj] = true
+                pressedCount += 1
+                pcall(warn, "[Join] pressed ACCEPT on " .. obj:GetFullName() .. " -> " .. tostring(ok))
+            end
+        end
+    end
+    return pressedCount
+end
+
+function UI.startJoinAccept()
+    task.spawn(function()
+        while not isCleaningUp do
+            task.wait(0.2)
+            if isAutoplay and SETTINGS.LobbyMode == "Host" and not SETTINGS.FollowHost then
+                pcall(UI.pressJoinAcceptButtons)
+            end
+        end
+    end)
+end
+
+-- BOSS RAID stages gate the fight behind a "Players Ready: X/Y" screen where every party member must press
+-- Ready. Other dungeons don't have this gate at all, so the presence of that "Players Ready" label IS the
+-- boss raid check - self-gating, no need to guess the dungeon/map name.
+local function isBossRaidStage()
+    local pGui = player:FindFirstChild("PlayerGui")
+    if not pGui then return false end
+    for _, obj in ipairs(pGui:GetDescendants()) do
+        if obj:IsA("TextLabel") and obj.Text:lower():match("players ready") then
+            return true
+        end
+    end
+    return false
+end
+
+-- finds the on-screen "Ready" button of the boss raid ready-check screen and presses it.
+-- Mirrors UI.clickAcceptButton's click strategy (fire the button's own handlers, then a real mouse click).
+function UI.clickReadyButton()
+    local pGui = player:FindFirstChild("PlayerGui")
+    if not pGui then return false, "no PlayerGui" end
+    local function shown(obj)
+        local cur = obj
+        while cur and cur ~= pGui do
+            if cur:IsA("GuiObject") and not cur.Visible then return false end
+            if cur:IsA("ScreenGui") and not cur.Enabled then return false end
+            cur = cur.Parent
+        end
+        return obj.AbsoluteSize.X > 0 and obj.AbsoluteSize.Y > 0
+    end
+    local function findBtn()
+        for _, obj in ipairs(pGui:GetDescendants()) do
+            if obj:IsA("TextButton") and obj.Text:lower():match("^%s*ready%s*$")
+                and not (UI.screenGui and obj:IsDescendantOf(UI.screenGui)) and shown(obj) then
+                return obj
+            end
+        end
+    end
+    local btn = findBtn()
+    if not btn then return false, "Ready button not found" end
+    pcall(warn, "[BossRaid] Ready button: " .. btn:GetFullName() .. " (" .. btn.ClassName .. ")")
+
+    local target = btn
+    for _ = 1, 3 do
+        if target and target:IsA("GuiButton") then
+            pcall(function()
+                if getconnections then
+                    for _, sig in ipairs({ target.MouseButton1Click, target.Activated, target.MouseButton1Down, target.MouseButton1Up }) do
+                        for _, c in ipairs(getconnections(sig)) do c:Fire() end
+                    end
+                elseif firesignal then
+                    firesignal(target.MouseButton1Click)
+                    firesignal(target.Activated)
                 end
+            end)
+        end
+        target = target and target.Parent
+    end
+    task.wait(0.2)
+
+    pcall(function()
+        local gui = btn:FindFirstAncestorOfClass("ScreenGui")
+        local inset = (gui and gui.IgnoreGuiInset) and Vector2.zero or game:GetService("GuiService"):GetGuiInset()
+        local pos = btn.AbsolutePosition + btn.AbsoluteSize / 2 + inset
+        VirtualInputManager:SendMouseMoveEvent(pos.X, pos.Y, game)
+        task.wait(0.05)
+        VirtualInputManager:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 0)
+        task.wait(0.06)
+        VirtualInputManager:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
+    end)
+    return true, "pressed ready"
+end
+
+-- AUTO READY (BOSS RAID): polls for the boss raid ready-check screen and presses our own Ready button as
+-- soon as it appears. Latches on the button instance so it's only pressed once per appearance (the button
+-- may stay on screen after pressing while waiting on other players, and must not be spam-clicked / un-readied).
+function UI.startAutoReady()
+    task.spawn(function()
+        local pressedFor = nil
+        while not isCleaningUp do
+            task.wait(0.2)
+            if isBossRaidStage() then
+                local pGui = player:FindFirstChild("PlayerGui")
+                local btn
+                for _, obj in ipairs(pGui and pGui:GetDescendants() or {}) do
+                    if obj:IsA("TextButton") and obj.Text:lower():match("^%s*ready%s*$") and obj.AbsoluteSize.X > 0
+                        and not (UI.screenGui and obj:IsDescendantOf(UI.screenGui)) then
+                        btn = obj
+                        break
+                    end
+                end
+                if btn and btn ~= pressedFor then
+                    local ok, clicked, info = pcall(UI.clickReadyButton)
+                    pcall(warn, "[BossRaid] auto-ready -> " .. tostring(ok and clicked) .. " " .. tostring(info))
+                    if ok and clicked then pressedFor = btn end
+                elseif not btn then
+                    pressedFor = nil
+                end
+            else
+                pressedFor = nil
             end
         end
     end)
@@ -7847,3 +7974,4 @@ loadConfigAndAutoExecute()
 UI.startAutoTrade()
 UI.startAutoAccept()
 UI.startJoinAccept()
+UI.startAutoReady()
