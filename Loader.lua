@@ -511,24 +511,18 @@ end
 local function getInventoryCount()
 local pGui = player:FindFirstChild("PlayerGui")
 if not pGui then return 0 end
-local count = 0
-local sellShop = pGui:FindFirstChild("sellShop")
-
-local sellScroll = findNested(sellShop, "Frame", "innerFrame", "rightSideFrame", "ScrollingFrame")
-if sellScroll then
-    for _, slot in ipairs(sellScroll:GetChildren()) do
-        if slot:IsA("GuiObject") and slot:FindFirstChild("itemType") then count = count + 1 end
-    end
-end
-
+-- Only trust the inventory's own "current/max" label. The sellShop scroll frame used to be counted
+-- too, but it also fills up with template/reward slots right after a win (the boss-killed remote at
+-- line ~503 pops it open), which made this read as full and teleport to the lobby mid-run with an
+-- actually-empty inventory. inventorySpace is the one source that reflects the real count.
 local invSpaceLabel = findNested(pGui, "inventory", "mainBackground", "innerBackground", "rightSideFrame", "inventorySpace")
 if invSpaceLabel and invSpaceLabel:IsA("TextLabel") then
     -- must match "current/max" specifically (e.g. "285/300") -- a bare first-number match
     -- can grab the wrong number (like the "300" cap itself) and falsely read as full.
     local rawNum = invSpaceLabel.Text:match("(%d+)%s*/%s*%d+")
-    if rawNum and tonumber(rawNum) then count = math.max(count, tonumber(rawNum)) end
+    if rawNum and tonumber(rawNum) then return tonumber(rawNum) end
 end
-return count
+return 0
 end
 
 local function returnToLobby()
@@ -5880,9 +5874,18 @@ end
 -- called every frame the character is actively walking towards activeDodgePoint: burns the pool by the studs
 -- actually covered since the previous frame (not an assumed speed), and sets WalkSpeed for this frame's
 -- upcoming MoveTo/blink call - boosted while the pool has studs left, the normal speed once it is empty.
-function UI.applyDodgeBoost(pos)
+function UI.applyDodgeBoost(pos, hasEnemy)
     if not humanoid then return end
     if not UI.dodgeBoostNormalSpeed then UI.dodgeBoostNormalSpeed = humanoid.WalkSpeed end
+    if not hasEnemy then
+        -- no enemy left to dodge from: stop burning the pool, let it regen, walk at normal speed
+        UI.dodgeBoostLastPos = nil
+        humanoid.WalkSpeed = UI.dodgeBoostNormalSpeed
+        if UI.dodgeBoostPool < SETTINGS.DodgeBoostStuds then
+            UI.dodgeBoostPool = math.min(SETTINGS.DodgeBoostStuds, UI.dodgeBoostPool + SETTINGS.DodgeBoostStuds * (0.016 / DODGE_BOOST_REFILL_TIME))
+        end
+        return
+    end
     if UI.dodgeBoostLastPos then
         local moved = (pos - UI.dodgeBoostLastPos).Magnitude
         if moved < 30 then -- a bigger jump is a blink landing here, already charged separately below
@@ -6475,8 +6478,9 @@ if currentlyInDanger or (activeDodgePoint and now < dodgeExpiration) then
 
         -- DODGE BOOST: charges the pool for the studs actually covered since last frame and sets WalkSpeed for
         -- the movement call right below - boosted while the pool still has studs, normal once it is spent. Only
-        -- affects travel speed to the point chosen above, never the point itself.
-        UI.applyDodgeBoost(playerPos)
+        -- affects travel speed to the point chosen above, never the point itself. Skipped (pool untouched, normal
+        -- speed) once the enemy is gone, so a dodge that outlives its target does not keep burning the budget.
+        UI.applyDodgeBoost(playerPos, activeTarget ~= nil)
 
         local allowTeleport = (SETTINGS.GameplayMode ~= "Legit Player") and (SETTINGS.GameplayMode ~= "No TP Auto Play")
         if allowTeleport and (now - lastTpDodgeTime >= 1.5) then
