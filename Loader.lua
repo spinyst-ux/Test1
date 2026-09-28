@@ -4259,11 +4259,16 @@ if not readSuccess or not fileData then return end
 local success, cfg = pcall(function() return HttpService:JSONDecode(fileData) end)
 
 if success and type(cfg) == "table" then
-    applyConfigData(cfg)
+    local applyOk = pcall(applyConfigData, cfg)
+    if not applyOk then pcall(warn, "[Autoplay] applyConfigData failed on resume, using defaults for whatever didn't parse") end
 
     if SETTINGS.Autoplay == true then
-        if selectedMacroName ~= "" then loadMacroFromFile(selectedMacroName) end
+        -- Flip isAutoplay before anything below that could error (macro load, humanoid refs still
+        -- settling right after a teleport) -- a downstream throw here used to silently abort this whole
+        -- function before isAutoplay=true ran, leaving autoplay stuck OFF even though the saved config
+        -- (and the button, last time the user looked) said it should be ON.
         isAutoplay = true
+        if selectedMacroName ~= "" then pcall(loadMacroFromFile, selectedMacroName) end
         UI.dodgeBoostPool = SETTINGS.DodgeBoostStuds
         UI.dodgeBoostLastPos, UI.dodgeBoostNormalSpeed = nil, nil
         if humanoid then
