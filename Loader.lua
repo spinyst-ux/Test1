@@ -1149,6 +1149,8 @@ if remotes then
 local cloneRewardGui = remotes:WaitForChild("cloneRewardGui", 5)
 if cloneRewardGui then
 local conn = cloneRewardGui.OnClientEvent:Connect(function(data)
+-- this fires on a real clear; never let the stage-loss check misfire for the attempt we just won
+hasSentStageLoss = true
 if type(data) == "table" then pcall(sendRewardWebhook, data) end
 
             if isAutoplay then
@@ -3993,6 +3995,7 @@ runMacroBtn.MouseButton1Click:Connect(function()
         -- replay until the next death. Reset them here too, not just in setupCharacterConstraints.
         hasReplayedFromTime = false
         hasSentStageLoss = false
+        UI.stageTimerArmed = false
         partyWasFull = false
         runStartTime = os.clock()
         UI.dodgeBoostPool = SETTINGS.DodgeBoostStuds
@@ -4604,6 +4607,7 @@ hasReturnedToLobby = false
 partyWasFull = false
 hasReplayedFromTime = false
 hasSentStageLoss = false
+UI.stageTimerArmed = false
 characterSpawnTime = os.clock()
 postDodgeHoldUntil = 0
 lastStartValueTime = os.clock()
@@ -4775,9 +4779,19 @@ else
 end
 end
 
+-- Tweened attack VFX fire Transparency/Color/Size changes many times per frame; collapse them into
+-- one scoreHazardPart per part per frame instead of one per signal (was the main combat-lag source).
+local hazardRescorePending = setmetatable({}, { __mode = "k" })
 local function bindHazardEvents(obj)
 cleanupPartConnections(obj)
-local function onPropChanged() evaluateAndAddHazardPart(obj) end
+local function onPropChanged()
+    if hazardRescorePending[obj] then return end
+    hazardRescorePending[obj] = true
+    task.defer(function()
+        hazardRescorePending[obj] = nil
+        if obj.Parent then evaluateAndAddHazardPart(obj) end
+    end)
+end
 hazardSignals[obj] = {
 obj:GetPropertyChangedSignal("Transparency"):Connect(onPropChanged),
 obj:GetPropertyChangedSignal("Color"):Connect(onPropChanged),
@@ -6171,6 +6185,7 @@ if isInLobby() then
     -- handleLobbyAutomation and breaks follow-host on the 2nd+ host-leave cycle.
     hasReturnedToLobby = false
     hasSentStageLoss = false
+    UI.stageTimerArmed = false
     hasReplayedFromTime = false
     partyWasFull = false
     handleLobbyAutomation()
@@ -6188,7 +6203,11 @@ if not hasSentStageLoss then
     local timeFrame = timeGui and findNested(timeGui, "Frame", "time")
     if timeFrame and timeFrame:IsA("TextLabel") then
         local secs = parseTimeToSeconds(timeFrame.Text)
-        if secs ~= nil and secs <= 0 then
+        -- a fresh dungeon's timer GUI can still show a stale "0:00" left over from the previous attempt for a
+        -- moment after a win/replay; only trust a 0 reading once we've actually seen the timer running (>0) or
+        -- a few seconds have passed, so a just-won run never gets misreported as a loss.
+        if secs ~= nil and secs > 0 then UI.stageTimerArmed = true end
+        if secs ~= nil and secs <= 0 and (UI.stageTimerArmed or (os.clock() - runStartTime) > 10) then
             hasSentStageLoss = true
             setStatus("Status: Time ran out - Stage Loss!", true)
             pcall(warn, "[Webhook] time hit zero (\"" .. tostring(timeFrame.Text) .. "\") - sending STAGE LOSS webhook")
