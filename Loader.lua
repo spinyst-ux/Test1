@@ -40,6 +40,9 @@ end)
 local character = player.Character or player.CharacterAdded:Wait()
 local humanoid = character:WaitForChild("Humanoid", 5)
 local rootPart = character:WaitForChild("HumanoidRootPart", 5)
+local attachment, alignOrient -- declared here (not near setupCharacterConstraints) so every
+-- earlier `if alignOrient then ...` reference (returnToLobby, UI handlers) shares this upvalue
+-- instead of silently reading an always-nil global.
 
 local httpRequest = (syn and syn.request) or (http and http.request) or http_request or request
 local setClipboard = setclipboard or toclipboard or function(text) end
@@ -4044,6 +4047,13 @@ end
 function applyConfigData(cfg)
 if type(cfg) ~= "table" then return end
 
+-- Restore macro selection first: applyConfigData is one long function wrapped in a single
+-- pcall by loadConfigAndAutoExecute, so any throw further down used to abort before this ran,
+-- silently unselecting the macro on every teleport-triggered reload even though the config file
+-- still had it saved. Same failure mode as the isAutoplay-stuck-off bug fixed earlier.
+if cfg.SelectedMacro then selectedMacroName = cfg.SelectedMacro end
+refreshMacroList()
+
 if cfg.Autoplay ~= nil then SETTINGS.Autoplay = cfg.Autoplay end
 SETTINGS.MinDistance = cfg.MinDistance or SETTINGS.MinDistance
 SETTINGS.MaxDistance = cfg.MaxDistance or SETTINGS.MaxDistance
@@ -4246,9 +4256,6 @@ if UI.eifSlotBtn then UI.eifSlotBtn.Text = "EIF Slot: " .. SETTINGS.EIFSpammerSl
 
 updateIgnoreKeywords()
 updateIgnoreEnemyNames()
-
-if cfg.SelectedMacro then selectedMacroName = cfg.SelectedMacro end
-refreshMacroList()
 end
 
 local function loadConfigAndAutoExecute()
@@ -4576,7 +4583,6 @@ task.spawn(function()
         task.wait(2)
     end
 end)
-local attachment, alignOrient
 local function setupCharacterConstraints(newChar)
 character = newChar
 humanoid = character:WaitForChild("Humanoid", 5)
@@ -4944,7 +4950,7 @@ function UI.scanScenery()
     local myId = UI.sceneryScanId
     task.spawn(function()
         for i, obj in ipairs(Workspace:GetDescendants()) do
-            if myId ~= UI.sceneryScanId or isCleaningUp then return end
+            if myId ~= UI.sceneryScanId or isCleaningUp or not (SETTINGS.RemoveMap or SETTINGS.FpsBoost) then return end
             if obj:IsA("BasePart") then
                 local born = UI.partBorn[obj]
                 if born and os.clock() - born < 5 then
