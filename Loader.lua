@@ -5068,17 +5068,18 @@ function UI.refreshPerfRows()
         end
     end
     if UI.fpsBoostQuickBtn then
-        UI.fpsBoostQuickBtn.BackgroundColor3 = SETTINGS.FpsBoost and Color3.fromRGB(40, 150, 70) or T.field
+        UI.fpsBoostQuickBtn.BackgroundColor3 = SETTINGS.FpsBoost and Color3.fromRGB(40, 150, 70) or UI.theme.field
     end
     if UI.removeMapQuickBtn then
-        UI.removeMapQuickBtn.BackgroundColor3 = SETTINGS.RemoveMap and Color3.fromRGB(40, 150, 70) or T.field
+        UI.removeMapQuickBtn.BackgroundColor3 = SETTINGS.RemoveMap and Color3.fromRGB(40, 150, 70) or UI.theme.field
     end
 end
 
 function UI.applyRemoveMap(enabled, skipSave)
     local was = SETTINGS.RemoveMap
     SETTINGS.RemoveMap = enabled and true or false
-    if SETTINGS.RemoveMap then UI.scanScenery() elseif was then UI.restoreMap() end
+    -- pcall: a throw here (e.g. a part destroyed mid-iteration) must never skip the UI sync below
+    if SETTINGS.RemoveMap then pcall(UI.scanScenery) elseif was then pcall(UI.restoreMap) end
     UI.refreshPerfRows()
     if not skipSave then
         saveConfig()
@@ -5089,11 +5090,12 @@ end
 function UI.applyFpsBoost(enabled, skipSave)
     local was = SETTINGS.FpsBoost
     SETTINGS.FpsBoost = enabled and true or false
+    -- pcall: a throw here must never skip the UI sync below
     if SETTINGS.FpsBoost then
-        UI.applyLightingBoost(true)
-        UI.scanScenery()
+        pcall(UI.applyLightingBoost, true)
+        pcall(UI.scanScenery)
     elseif was then
-        UI.restoreFps()
+        pcall(UI.restoreFps)
     end
     UI.refreshPerfRows()
     if not skipSave then
