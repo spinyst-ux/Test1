@@ -1885,28 +1885,34 @@ local function makeBar(parent, w, h, rot)
     return f
 end
 
-UI.blackScreenQuickBtn = makeWindowButton(664)
+UI.blackScreenQuickBtn = makeWindowButton(706)
 UI.blackScreenQuickBtn.Font = Enum.Font.GothamBold
 UI.blackScreenQuickBtn.TextSize = 15
 UI.blackScreenQuickBtn.TextColor3 = T.text
 UI.blackScreenQuickBtn.Text = "🌑"
 
-UI.autoHideQuickBtn = makeWindowButton(622)
+UI.autoHideQuickBtn = makeWindowButton(664)
 UI.autoHideQuickBtn.Font = Enum.Font.GothamBold
 UI.autoHideQuickBtn.TextSize = 15
 UI.autoHideQuickBtn.TextColor3 = T.text
 UI.autoHideQuickBtn.Text = "👁"
 
-UI.fpsBoostQuickBtn = makeWindowButton(580)
+UI.fpsBoostQuickBtn = makeWindowButton(622)
 UI.fpsBoostQuickBtn.Font = Enum.Font.GothamBold
 UI.fpsBoostQuickBtn.TextSize = 15
 UI.fpsBoostQuickBtn.TextColor3 = T.text
 UI.fpsBoostQuickBtn.Text = "⚡"
-statusLabel.Size = UDim2.new(0, 172, 1, 0)
 
-local minimizeBtn = makeWindowButton(706)
+UI.removeMapQuickBtn = makeWindowButton(580)
+UI.removeMapQuickBtn.Font = Enum.Font.GothamBold
+UI.removeMapQuickBtn.TextSize = 15
+UI.removeMapQuickBtn.TextColor3 = T.text
+UI.removeMapQuickBtn.Text = "🗺"
+statusLabel.Size = UDim2.new(0, 164, 1, 0)
+
+local minimizeBtn = makeWindowButton(748)
 makeBar(minimizeBtn, 14, 2)
-local maximizeBtn = makeWindowButton(748)
+local maximizeBtn = makeWindowButton(790)
 local maxIcon = Instance.new("Frame")
 maxIcon.AnchorPoint = Vector2.new(0.5, 0.5)
 maxIcon.Position = UDim2.new(0.5, 0, 0.5, 0)
@@ -1914,7 +1920,7 @@ maxIcon.Size = UDim2.new(0, 13, 0, 13)
 maxIcon.BackgroundTransparency = 1
 maxIcon.Parent = maximizeBtn
 stroke(maxIcon, T.text, 2)
-local closeBtn = makeWindowButton(790)
+local closeBtn = makeWindowButton(832)
 makeBar(closeBtn, 17, 2, 45)
 makeBar(closeBtn, 17, 2, -45)
 
@@ -3894,6 +3900,9 @@ end)
 UI.fpsBoostQuickBtn.MouseButton1Click:Connect(function()
     if UI.applyFpsBoost then UI.applyFpsBoost(not SETTINGS.FpsBoost) end
 end)
+UI.removeMapQuickBtn.MouseButton1Click:Connect(function()
+    if UI.applyRemoveMap then UI.applyRemoveMap(not SETTINGS.RemoveMap) end
+end)
 
 UI.autoDodgeRow.MouseButton1Click:Connect(function()
     SETTINGS.AutoDodgeEnabled = not SETTINGS.AutoDodgeEnabled
@@ -5049,6 +5058,9 @@ function UI.refreshPerfRows()
     end
     if UI.fpsBoostQuickBtn then
         UI.fpsBoostQuickBtn.BackgroundColor3 = SETTINGS.FpsBoost and Color3.fromRGB(40, 150, 70) or T.field
+    end
+    if UI.removeMapQuickBtn then
+        UI.removeMapQuickBtn.BackgroundColor3 = SETTINGS.RemoveMap and Color3.fromRGB(40, 150, 70) or T.field
     end
 end
 
@@ -6229,7 +6241,10 @@ if SETTINGS.FollowHost and normalizeName(SETTINGS.JoinPlayerName) ~= "" then
     end
     if hostHere then
         UI.hostSeen, UI.hostMissingSince = true, nil
-    elseif UI.hostSeen then
+    else
+        -- No UI.hostSeen gate here: if the host already left before we got our first
+        -- check (e.g. left mid-execution/auto-resume), we must still start the timer
+        -- instead of waiting for a "seen" flag that will never become true.
         UI.hostMissingSince = UI.hostMissingSince or os.clock()
         if os.clock() - UI.hostMissingSince >= 3 then
             UI.hostSeen, UI.hostMissingSince = false, nil
@@ -6457,8 +6472,14 @@ if currentlyInDanger or (activeDodgePoint and now < dodgeExpiration) then
     elseif isPointInDanger(activeDodgePoint, hazards) then
         replan = true
     elseif currentlyInDanger then
-        replan = now - (UI.planTime or 0) >= 0.5 or UI.countCovering(playerPos, hazards) > (UI.planCovering or 0)
-            or UI.routeBlocked(playerPos, activeDodgePoint, hazards)
+        -- countCovering/routeBlocked walk every hazard (routeBlocked up to 14x each); checking this every
+        -- frame is what spikes CPU while a skill is live and hazard count is high. 10x/s is still plenty
+        -- responsive, and the 0.5s hard replan above remains as a backstop either way.
+        if now - (UI.replanCheckAt or 0) >= 0.1 then
+            UI.replanCheckAt = now
+            replan = now - (UI.planTime or 0) >= 0.5 or UI.countCovering(playerPos, hazards) > (UI.planCovering or 0)
+                or UI.routeBlocked(playerPos, activeDodgePoint, hazards)
+        end
     end
     if replan then
         local enemyPos = activeTarget and activeTarget:FindFirstChild("HumanoidRootPart") and activeTarget.HumanoidRootPart.Position or playerPos
