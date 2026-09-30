@@ -119,8 +119,11 @@ local SETTINGS = {
     WallRayLength = 5.5,
     Webhook = "",
     WebhookLogo = "",
+    PartyLeavePing = "",
+    PartyLeavePingEnabled = false,
     IgnoreKeywords = "ring1, ring2, ring3, ring4, ring5, ring6",
     AutoSellEnabled = false,
+    AutoSellForBot = false,
     AutoSellConfig = {
         weapon = { common = false, uncommon = false, rare = false, epic = false, legendary = false, ultimate = false },
         helmet = { common = false, uncommon = false, rare = false, epic = false, legendary = false, ultimate = false },
@@ -157,7 +160,7 @@ local SETTINGS = {
     AutoAcceptRequireGold = false,
     AcceptUsername = "",
     TradeUsername = "",
-    GameplayMode = "No TP Auto Play",
+    GameplayMode = "Get Carried Mode",
     ReplayOnDisconnect = true,   -- always on, no toggle in the menu
     RejoinOnDisconnect = true,   -- always on, no toggle in the menu
     ReplayTime = ""
@@ -222,6 +225,7 @@ for _, p in ipairs(Players:GetPlayers()) do hookPlayer(p) end
 table.insert(connections, Players.PlayerAdded:Connect(hookPlayer))
 table.insert(connections, Players.PlayerRemoving:Connect(function(p)
     if p.Character then unregisterPlayerChar(p.Character) end
+    if p ~= player and UI.sendPartyLeaveWebhook then pcall(UI.sendPartyLeaveWebhook, p.Name) end
 end))
 
 local function isPlayerOrTeammatePart(obj)
@@ -474,14 +478,33 @@ for _, slot in ipairs(scroll:GetChildren()) do
 end
 
 if totalItemCount > 0 then
+    -- fired = the remote actually existed and got invoked, not just "we built a payload". Reporting
+    -- "sold" whenever totalItemCount > 0 (the old behavior) lied to the status bar if sellItemEvent
+    -- was missing or ReplicatedStorage.remotes wasn't found - the message said sold, nothing sold.
+    local fired = false
     pcall(function()
         local remotes = ReplicatedStorage:FindFirstChild("remotes")
-        if remotes then
-            local sellItemEvent = remotes:FindFirstChild("sellItemEvent")
+        local sellItemEvent = remotes and remotes:FindFirstChild("sellItemEvent")
+        if sellItemEvent then
             safeInvoke(sellItemEvent, payload)
+            fired = true
         end
     end)
-    setStatus(string.format("Auto-Sell: sold %d items", totalItemCount), true)
+    if fired then
+        setStatus(string.format("Auto-Sell: sold %d items", totalItemCount), true)
+    else
+        setStatus("Auto-Sell: found matching items but sellItemEvent remote is missing", true)
+        pcall(function()
+            local remotes = ReplicatedStorage:FindFirstChild("remotes")
+            local names = {}
+            for _, r in ipairs(remotes and remotes:GetChildren() or {}) do
+                if r.Name:lower():find("sell", 1, true) then table.insert(names, r.Name .. " (" .. r.ClassName .. ")") end
+            end
+            warn("[Auto-Sell] sellItemEvent not found under ReplicatedStorage.remotes. Sell-related remotes: " .. (#names > 0 and table.concat(names, ", ") or "none"))
+        end)
+    end
+elseif not quiet then
+    setStatus("Auto-Sell: no matching items (check rarity checkboxes in What to Sell)", true)
 end
 end
 
@@ -489,6 +512,7 @@ end
 
 local function fireReplayDungeonRemote()
 if isInLobby() then return end
+UI.suppressPartyLeaveUntil = os.clock() + 6
 
 local currentDungeonName = SETTINGS.LobbyMap
 pcall(function()
@@ -1145,6 +1169,40 @@ local function sendStageLossWebhook()
     runStartTime = os.clock()
     postWebhook(url, buildStatusEmbed(timeText, "💀 STAGE LOSS - Time Ran Out", nil, 15158332), "loss")
 end
+
+-- posted whenever a party member disconnects mid-dungeon; content carries the ping (Discord only
+-- notifies from the message's top-level "content", never from inside an embed)
+local function formatPingMention(raw)
+    raw = tostring(raw or ""):match("^%s*(.-)%s*$")
+    if raw == "" then return "" end
+    if raw:match("^<@&?%d+>$") then return raw end
+    local lower = raw:lower()
+    if lower == "everyone" or lower == "@everyone" then return "@everyone" end
+    local digits = raw:match("^@?(%d+)$")
+    if digits then return "<@" .. digits .. ">" end
+    return raw
+end
+
+function UI.sendPartyLeaveWebhook(leftName)
+    if not SETTINGS.PartyLeavePingEnabled then return end
+    if not isAutoplay or isInLobby() then return end
+    if os.clock() < (UI.suppressPartyLeaveUntil or 0) then return end
+    local url = cleanWebhookUrl(SETTINGS.Webhook)
+    if url == "" then return end
+    local mention = formatPingMention(SETTINGS.PartyLeavePing)
+    postWebhook(url, {
+        username = "NCL MACRO",
+        content = mention ~= "" and mention or nil,
+        embeds = { {
+            title = "⚠️ Party Member Left",
+            description = string.format("**%s** left the party.", safeField(leftName)),
+            color = 15158332,
+            footer = { text = "NCL MACRO  •  Dungeon Quest Reborn" },
+            timestamp = DateTime.now():ToIsoDate(),
+        } },
+        _attachLogo = true,
+    }, "party-leave")
+end
 -- Reward Hook
 task.spawn(function()
 local remotes = ReplicatedStorage:WaitForChild("remotes", 5)
@@ -1219,6 +1277,8 @@ Autoplay = SETTINGS.Autoplay,
 SelectedMacro = selectedMacroName,
 Webhook = SETTINGS.Webhook,
 WebhookLogo = SETTINGS.WebhookLogo,
+PartyLeavePing = SETTINGS.PartyLeavePing,
+PartyLeavePingEnabled = SETTINGS.PartyLeavePingEnabled,
 IgnoreKeywords = SETTINGS.IgnoreKeywords,
 IgnoreEnemyNames = SETTINGS.IgnoreEnemyNames,
 MinDistance = SETTINGS.MinDistance,
@@ -1237,6 +1297,7 @@ WaypointTriggerDist = SETTINGS.WaypointTriggerDist,
 MaxNodeDistance = SETTINGS.MaxNodeDistance,
 WallRayLength = SETTINGS.WallRayLength,
 AutoSellEnabled = SETTINGS.AutoSellEnabled,
+AutoSellForBot = SETTINGS.AutoSellForBot,
 AutoSellConfig = SETTINGS.AutoSellConfig,
 AutoLobbyEnabled = SETTINGS.AutoLobbyEnabled,
 LobbyMode = SETTINGS.LobbyMode,
@@ -1399,8 +1460,12 @@ for _, filePath in ipairs(files) do
                 setStatus("Unselected Macro: " .. cleanName)
             else
                 selectedMacroName = cleanName
-                loadMacroFromFile(cleanName)
-                setStatus("Selected Macro: " .. cleanName)
+                clearWaypoints()
+                if not loadMacroFromFile(cleanName) then
+                    setStatus("Error: Failed to load " .. cleanName)
+                else
+                    setStatus("Selected Macro: " .. cleanName)
+                end
             end
             refreshMacroList()
             UI.macroScroll.Visible = false
@@ -1709,6 +1774,15 @@ local function stroke(inst, color, thickness)
     return s
 end
 
+-- soft top-to-bottom shading + top highlight for panels/cards (visual only)
+local function polish(inst, strength)
+    local g = Instance.new("UIGradient")
+    g.Rotation = 90
+    g.Color = ColorSequence.new(Color3.fromRGB(255, 255, 255), Color3.fromRGB(strength or 214, (strength or 214) + 2, (strength or 214) + 12))
+    g.Parent = inst
+    return g
+end
+
 local function makeText(parent, text, size, color, font, xAlign)
     local lbl = Instance.new("TextLabel")
     lbl.BackgroundTransparency = 1
@@ -1782,6 +1856,7 @@ header.BorderSizePixel = 0
 header.Parent = mainFrame
 round(header, 12)
 stroke(header)
+polish(header)
 
 -- thin gradient accent line along the bottom of the header
 local accentLine = Instance.new("Frame")
@@ -1870,6 +1945,7 @@ local function makeWindowButton(x)
     btn.BorderSizePixel = 0
     btn.Parent = header
     round(btn, 8)
+    polish(btn, 200)
     local btnStroke = stroke(btn)
     btn.MouseEnter:Connect(function() btnStroke.Color = T.accent end)
     btn.MouseLeave:Connect(function() btnStroke.Color = T.stroke end)
@@ -1970,32 +2046,49 @@ local TOGGLE_ON_COLOR = Color3.fromRGB(40, 150, 70)
 local function MakeToggle(text, isOn, parent)
     local btn = MakeButton(text, isOn and TOGGLE_ON_COLOR or T.idle, parent)
 
+    btn.TextXAlignment = Enum.TextXAlignment.Left
+    local togPad = Instance.new("UIPadding")
+    togPad.PaddingLeft = UDim.new(0, 12)
+    togPad.Parent = btn
+
+    -- switch track + knob (replaces the old LED dot)
     local led = Instance.new("Frame")
     led.Name = "ToggleLED"
     led.AnchorPoint = Vector2.new(1, 0.5)
     led.Position = UDim2.new(1, -12, 0.5, 0)
-    led.Size = UDim2.new(0, 8, 0, 8)
-    led.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    led.Size = UDim2.new(0, 34, 0, 18)
+    led.BackgroundColor3 = Color3.fromRGB(38, 46, 84)
     led.BorderSizePixel = 0
     led.ZIndex = 3
     led.Parent = btn
-    round(led, 4)
+    round(led, 9)
+    local knob = Instance.new("Frame")
+    knob.Name = "Knob"
+    knob.AnchorPoint = Vector2.new(0, 0.5)
+    knob.Position = UDim2.new(0, 2, 0.5, 0)
+    knob.Size = UDim2.new(0, 14, 0, 14)
+    knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    knob.BorderSizePixel = 0
+    knob.ZIndex = 4
+    knob.Parent = led
+    round(knob, 7)
     local ledGlow = Instance.new("UIStroke")
-    ledGlow.Color = Color3.fromRGB(255, 255, 255)
+    ledGlow.Color = T.green
     ledGlow.Thickness = 1
-    ledGlow.Transparency = 0.5
+    ledGlow.Transparency = 1
     ledGlow.Parent = led
 
     local edge = stroke(btn, T.stroke, 1)
 
     local function sync()
         local on = btn.BackgroundColor3 == TOGGLE_ON_COLOR
-        led.BackgroundColor3 = on and Color3.fromRGB(220, 255, 235) or Color3.fromRGB(120, 128, 150)
+        led.BackgroundColor3 = on and T.green or Color3.fromRGB(38, 46, 84)
+        ledGlow.Transparency = on and 0.35 or 1
         edge.Color = on and Color3.fromRGB(70, 220, 140) or T.stroke
         edge.Transparency = on and 0.35 or 0.6
         pcall(function()
-            game:GetService("TweenService"):Create(led, TweenInfo.new(0.15), {
-                Size = on and UDim2.new(0, 9, 0, 9) or UDim2.new(0, 7, 0, 7)
+            game:GetService("TweenService"):Create(knob, TweenInfo.new(0.15), {
+                Position = on and UDim2.new(0, 18, 0.5, 0) or UDim2.new(0, 2, 0.5, 0)
             }):Play()
         end)
     end
@@ -2048,8 +2141,24 @@ local function rowSize(fraction, count)
 end
 
 local function MakeSectionLabel(text, parent)
-    local lbl = makeText(parent, text:upper(), 11, T.muted, Enum.Font.GothamBold)
+    local lbl = makeText(parent, text:upper(), 11, Color3.fromRGB(201, 208, 245), Enum.Font.GothamBold)
     lbl.Size = UDim2.new(1, 0, 0, 18)
+    local lblPad = Instance.new("UIPadding")
+    lblPad.PaddingLeft = UDim.new(0, 12)
+    lblPad.Parent = lbl
+    local bar = Instance.new("Frame")
+    bar.Size = UDim2.new(0, 4, 0, 14)
+    bar.Position = UDim2.new(0, -12, 0.5, -7)
+    bar.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    bar.BorderSizePixel = 0
+    bar.Parent = lbl
+    round(bar, 2)
+    local barGrad = Instance.new("UIGradient")
+    barGrad.Rotation = 90
+    barGrad.Color = ColorSequence.new(Color3.fromRGB(79, 124, 255), Color3.fromRGB(139, 92, 246))
+    barGrad.Parent = bar
+    local barGlow = stroke(bar, Color3.fromRGB(139, 92, 246), 2)
+    barGlow.Transparency = 0.6
     return lbl
 end
 
@@ -2264,6 +2373,7 @@ local function createPage(title, subtitle)
     page.Parent = body
     round(page, 12)
     stroke(page)
+    polish(page)
 
     local pad = Instance.new("UIPadding")
     pad.PaddingTop = UDim.new(0, 14)
@@ -2316,6 +2426,7 @@ sidebar.BorderSizePixel = 0
 sidebar.Parent = body
 round(sidebar, 14)
 stroke(sidebar)
+polish(sidebar)
 
 local sidebarPad = Instance.new("UIPadding")
 sidebarPad.PaddingTop = UDim.new(0, 8)
@@ -2435,6 +2546,12 @@ local function switchTab(index)
         t.bar.Visible = active
     end
     if UI.macroScroll then UI.macroScroll.Visible = false end
+    -- Path / Clear Path cards are Macro-only; on other tabs the page + run bar widen to fill the gap
+    local isMacro = (index == 1)
+    for _, c in ipairs(UI.rightCards or {}) do c.Visible = isMacro end
+    local w = isMacro and PAGE_W or (PAGE_W + 254)
+    for _, t in ipairs(tabs) do t.page.Size = UDim2.new(0, w, 0, PAGE_H) end
+    if UI.bottomBar then UI.bottomBar.Size = UDim2.new(0, w, 0, 46) end
 end
 
 local function createTab(text, page)
@@ -2822,6 +2939,33 @@ webhookNote.Size = UDim2.new(1, 0, 0, 34)
 webhookNote.TextWrapped = true
 webhookNote.TextYAlignment = Enum.TextYAlignment.Top
 
+MakeSectionLabel("Party Leave Alert", webhookPage)
+UI.partyLeavePingRow = MakeToggle("Ping on Party Leave: " .. (SETTINGS.PartyLeavePingEnabled and "ON" or "OFF"), SETTINGS.PartyLeavePingEnabled, webhookPage)
+UI.partyLeavePingRow.MouseButton1Click:Connect(function()
+    SETTINGS.PartyLeavePingEnabled = not SETTINGS.PartyLeavePingEnabled
+    UI.partyLeavePingRow.Text = "Ping on Party Leave: " .. (SETTINGS.PartyLeavePingEnabled and "ON" or "OFF")
+    UI.partyLeavePingRow.BackgroundColor3 = SETTINGS.PartyLeavePingEnabled and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
+    saveConfig()
+end)
+UI.partyLeavePingInput = MakeInput("@everyone or a user ID (e.g. 123456789012345678)", webhookPage)
+UI.partyLeavePingInput.Text = SETTINGS.PartyLeavePing or ""
+UI.partyLeavePingInput.Size = UDim2.new(1, 0, 0, 38)
+UI.partyLeavePingInput.BackgroundColor3 = Color3.fromRGB(9, 11, 23)
+do
+    local inCorner = UI.partyLeavePingInput:FindFirstChildOfClass("UICorner")
+    if inCorner then inCorner.CornerRadius = UDim.new(0, 10) end
+    local inStroke = UI.partyLeavePingInput:FindFirstChildOfClass("UIStroke")
+    if inStroke then inStroke.Color = Color3.fromRGB(35, 40, 72) end
+end
+UI.partyLeavePingInput.FocusLost:Connect(function()
+    SETTINGS.PartyLeavePing = UI.partyLeavePingInput.Text
+    saveConfig()
+end)
+local partyLeaveNote = makeText(webhookPage, "Posts a message (with this ping) whenever a party member leaves mid-dungeon.", 12, T.muted, Enum.Font.Gotham)
+partyLeaveNote.Size = UDim2.new(1, 0, 0, 30)
+partyLeaveNote.TextWrapped = true
+partyLeaveNote.TextYAlignment = Enum.TextYAlignment.Top
+
 -- SETTING TAB
 MakeSectionLabel("Distances", settingsPage)
 UI.minDistInput = MakeSettingRow("Min Combat Dist (Run Away):", SETTINGS.MinDistance, settingsPage)
@@ -3024,8 +3168,9 @@ do
 end
 
 -- CONFIG IMPORT / EXPORT UI
-MakeSectionLabel("Backup & share settings", settingsPage)
-local configExportBtn = MakeButton("Copy my settings", Color3.fromRGB(77, 52, 201), settingsPage) -- .b.violet.wide.tall
+MakeSectionLabel("Backup & share settings", macroPage)
+
+local configExportBtn = MakeButton("Copy my settings", Color3.fromRGB(77, 52, 201), macroPage) -- .b.violet.wide.tall
 configExportBtn.Size = UDim2.new(1, 0, 0, 46)
 configExportBtn.Font = Enum.Font.GothamBold
 do
@@ -3033,7 +3178,7 @@ do
     if c then c.CornerRadius = UDim.new(0, 10) end
 end
 
-local configImportRow = MakeRow(settingsPage, 38)
+local configImportRow = MakeRow(macroPage, 38)
 local configImportInput = MakeInput("Paste settings from a friend...", configImportRow)
 configImportInput.Size = rowSize(0.78, 2)
 configImportInput.BackgroundColor3 = Color3.fromRGB(9, 11, 23)
@@ -3297,6 +3442,30 @@ UI.eifDelayInput = MakeSettingRow("EIF Spam Delay (s):", SETTINGS.EIFSpammerDela
 
 -- AUTO-SELL TAB (.sc cards from ncl-all-tabs.html: one card per category,
 -- six rarity pills laid out 3 columns x 2 rows, tinted with the rarity colour when active)
+UI.autoSellBotToggleBtn = MakeToggle("AUTO SELL FOR BOT: " .. (SETTINGS.AutoSellForBot and "ON" or "OFF"), SETTINGS.AutoSellForBot, sellPage)
+UI.autoSellBotToggleBtn.Size = UDim2.new(1, 0, 0, 38)
+do
+    local warnBox = Instance.new("Frame")
+    warnBox.Size = UDim2.new(1, 0, 0, 46)
+    warnBox.BackgroundColor3 = Color3.fromRGB(255, 181, 71)
+    warnBox.BackgroundTransparency = 0.9
+    warnBox.BorderSizePixel = 0
+    warnBox.Parent = sellPage
+    round(warnBox, 8)
+    local warnEdge = stroke(warnBox, Color3.fromRGB(255, 181, 71), 1)
+    warnEdge.Transparency = 0.55
+    local warnIcon = makeText(warnBox, "!", 12, Color3.fromRGB(11, 14, 27), Enum.Font.GothamBlack, Enum.TextXAlignment.Center)
+    warnIcon.BackgroundTransparency = 0
+    warnIcon.BackgroundColor3 = Color3.fromRGB(255, 181, 71)
+    warnIcon.Size = UDim2.new(0, 18, 0, 18)
+    warnIcon.Position = UDim2.new(0, 12, 0, 14)
+    round(warnIcon, 9)
+    local warnText = makeText(warnBox, "Warning: enabling this will automatically sell ALL Common, Uncommon, Rare and Epic items the bot picks up. Sold items cannot be recovered.", 12, Color3.fromRGB(255, 207, 133), Enum.Font.Gotham)
+    warnText.Size = UDim2.new(1, -46, 1, -8)
+    warnText.Position = UDim2.new(0, 40, 0, 4)
+    warnText.TextWrapped = true
+    warnText.TextYAlignment = Enum.TextYAlignment.Center
+end
 UI.autoSellToggleBtn = MakeToggle("Auto Sell: OFF", false, sellPage)
 UI.autoSellToggleBtn.Size = UDim2.new(1, 0, 0, 38)
 local sellNowBtn = MakeButton("Sell Matching Items Now", Color3.fromRGB(190, 105, 30), sellPage)
@@ -3311,17 +3480,17 @@ local SELL = {
     pillOff = Color3.fromRGB(90, 96, 144),  -- --dim
 }
 local RARITY_TINT = {
-    common    = Color3.fromRGB(174, 180, 216),
-    uncommon  = Color3.fromRGB(94, 224, 138),
-    rare      = Color3.fromRGB(91, 155, 255),
-    epic      = Color3.fromRGB(185, 140, 255),
-    legendary = Color3.fromRGB(255, 181, 71),
-    ultimate  = Color3.fromRGB(255, 93, 143),
+    common    = Color3.fromRGB(154, 163, 199),
+    uncommon  = Color3.fromRGB(47, 214, 123),
+    rare      = Color3.fromRGB(59, 130, 246),
+    epic      = Color3.fromRGB(168, 85, 247),
+    legendary = Color3.fromRGB(245, 158, 11),
+    ultimate  = Color3.fromRGB(239, 68, 112),
 }
 
 local function setupCategoryRaritySection(catKey, catDisplayName)
     local card = Instance.new("Frame")
-    card.Size = UDim2.new(1, 0, 0, 150)
+    card.Size = UDim2.new(1, 0, 0, 96)
     card.BackgroundColor3 = SELL.card
     card.BorderSizePixel = 0
     card.Parent = sellPage
@@ -3345,7 +3514,7 @@ local function setupCategoryRaritySection(catKey, catDisplayName)
     headerBtn.Visible = false
 
     local container = Instance.new("Frame")
-    container.Size = UDim2.new(1, 0, 0, 98)
+    container.Size = UDim2.new(1, 0, 0, 38)
     container.Position = UDim2.new(0, 0, 0, 28)
     container.BackgroundTransparency = 1
     container.Parent = card
@@ -3353,10 +3522,11 @@ local function setupCategoryRaritySection(catKey, catDisplayName)
     local grid = Instance.new("UIGridLayout")
     grid.Parent = container
     grid.SortOrder = Enum.SortOrder.LayoutOrder
-    grid.CellSize = UDim2.new(1 / 3, -7, 0, 44)
-    grid.CellPadding = UDim2.new(0, 10, 0, 10)
+    grid.CellSize = UDim2.new(1 / 6, -5, 0, 38)
+    grid.CellPadding = UDim2.new(0, 6, 0, 6)
 
     local buttons = {}
+    local paints = {}
     for i, rarity in ipairs(RARITY_ORDER) do
         local tint = RARITY_TINT[rarity]
         local label = rarity:sub(1, 1):upper() .. rarity:sub(2)
@@ -3364,9 +3534,9 @@ local function setupCategoryRaritySection(catKey, catDisplayName)
         local rBtn = MakeButton(label, SELL.pill, container)
         rBtn.LayoutOrder = i
         rBtn.Font = Enum.Font.GothamBold
-        rBtn.TextSize = 13
+        rBtn.TextSize = 11
         local corner = rBtn:FindFirstChildOfClass("UICorner")
-        if corner then corner.CornerRadius = UDim.new(0, 10) end
+        if corner then corner.CornerRadius = UDim.new(0, 9) end
         local edge = stroke(rBtn, SELL.edge, 1)
         buttons[rarity] = rBtn
 
@@ -3377,15 +3547,16 @@ local function setupCategoryRaritySection(catKey, catDisplayName)
             if painting then return end
             painting = true
             local on = SETTINGS.AutoSellConfig[catKey] and SETTINGS.AutoSellConfig[catKey][rarity]
-            rBtn.Text = on and (label .. "  ✓") or label
-            rBtn.TextColor3 = on and tint or SELL.pillOff
-            rBtn.BackgroundColor3 = on and tint:Lerp(SELL.pill, 0.84) or SELL.pill
-            edge.Color = on and tint:Lerp(SELL.card, 0.35) or SELL.edge
+            rBtn.Text = label
+            rBtn.TextColor3 = on and Color3.fromRGB(255, 255, 255) or tint:Lerp(SELL.pill, 0.2)
+            rBtn.BackgroundColor3 = on and tint or tint:Lerp(SELL.pill, 0.8)
+            edge.Color = on and tint or tint:Lerp(SELL.pill, 0.65)
             painting = false
         end
         paint()
         rBtn:GetPropertyChangedSignal("Text"):Connect(paint)
         rBtn:GetPropertyChangedSignal("BackgroundColor3"):Connect(paint)
+        paints[rarity] = paint
 
         rBtn.MouseButton1Click:Connect(function()
             SETTINGS.AutoSellConfig[catKey][rarity] = not SETTINGS.AutoSellConfig[catKey][rarity]
@@ -3399,6 +3570,7 @@ local function setupCategoryRaritySection(catKey, catDisplayName)
         headerBtn = headerBtn,
         container = container,
         buttons = buttons,
+        paints = paints,
         displayName = catDisplayName
     }
     updateCategoryDropdownTitle(catKey)
@@ -3416,6 +3588,33 @@ UI.autoSellToggleBtn.MouseButton1Click:Connect(function()
     saveConfig()
 end)
 
+-- ON = sells common/uncommon/rare/epic across every category (weapon, armor, helmet, ability) and
+-- turns the master Auto Sell switch on; legendary/ultimate are left alone so a bot account never
+-- auto-sells its best drops. OFF flips those same four rarities back off (mirrors ON) and turns the
+-- master switch off too, so the toggle is fully reversible.
+local AUTO_SELL_BOT_RARITIES = { common = true, uncommon = true, rare = true, epic = true }
+UI.autoSellBotToggleBtn.MouseButton1Click:Connect(function()
+    SETTINGS.AutoSellForBot = not SETTINGS.AutoSellForBot
+    UI.autoSellBotToggleBtn.Text = "AUTO SELL FOR BOT: " .. (SETTINGS.AutoSellForBot and "ON" or "OFF")
+    UI.autoSellBotToggleBtn.BackgroundColor3 = SETTINGS.AutoSellForBot and Color3.fromRGB(40, 150, 70) or T.idle
+
+    for catKey in pairs(SETTINGS.AutoSellConfig) do
+        for rarity in pairs(SETTINGS.AutoSellConfig[catKey]) do
+            if AUTO_SELL_BOT_RARITIES[rarity] then
+                SETTINGS.AutoSellConfig[catKey][rarity] = SETTINGS.AutoSellForBot
+            end
+        end
+        if UI.catSections[catKey] then
+            for _, paint in pairs(UI.catSections[catKey].paints) do paint() end
+            updateCategoryDropdownTitle(catKey)
+        end
+    end
+    SETTINGS.AutoSellEnabled = SETTINGS.AutoSellForBot
+    UI.autoSellToggleBtn.Text = "Auto Sell: " .. (SETTINGS.AutoSellEnabled and "ON" or "OFF")
+    UI.autoSellToggleBtn.BackgroundColor3 = SETTINGS.AutoSellEnabled and Color3.fromRGB(40, 150, 70) or T.idle
+    saveConfig()
+end)
+
 sellNowBtn.MouseButton1Click:Connect(executeAutoSell)
 
 -- BOTTOM CONTROLS
@@ -3424,24 +3623,29 @@ bottomBar.Size = UDim2.new(0, PAGE_W, 0, 46)
 bottomBar.Position = UDim2.new(0, PAGE_X, 0, 482)
 bottomBar.BackgroundTransparency = 1
 bottomBar.Parent = body
+UI.bottomBar = bottomBar
 
 local runMacroBtn = MakeButton("RUN SCRIPT (Autoplay)", T.accent, bottomBar)
 runMacroBtn.Size = UDim2.new(1, 0, 1, 0)
 runMacroBtn.TextSize = 14
 runMacroBtn.Font = Enum.Font.GothamBold
 UI.runMacroBtn = runMacroBtn
+do
+    local runGlow = stroke(runMacroBtn, Color3.fromRGB(147, 170, 255), 1)
+    runGlow.Transparency = 0.55
+end
 
 -- .btn-discord: sits at the bottom of the sidebar in the reference design
-local terminateBtn = MakeButton("DISCORD", Color3.fromRGB(26, 31, 67), sidebar)   -- .side-bottom: rgba(88,101,242,.14) on the card
-terminateBtn.TextColor3 = Color3.fromRGB(199, 203, 255)                                -- #c7cbff
+local terminateBtn = MakeButton("DISCORD", Color3.fromRGB(88, 101, 242), sidebar)   -- solid blurple button
+terminateBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
 terminateBtn.Font = Enum.Font.GothamBold
 terminateBtn.TextXAlignment = Enum.TextXAlignment.Center
 terminateBtn.AnchorPoint = Vector2.new(0, 1)
-terminateBtn.Size = UDim2.new(1, 0, 0, 38)
+terminateBtn.Size = UDim2.new(1, 0, 0, 40)
 terminateBtn.Position = UDim2.new(0, 0, 1, 0)
-local killStroke = stroke(terminateBtn, Color3.fromRGB(60, 70, 190))
-terminateBtn.MouseEnter:Connect(function() killStroke.Color = T.accent2 end)
-terminateBtn.MouseLeave:Connect(function() killStroke.Color = Color3.fromRGB(60, 70, 190) end)
+local killStroke = stroke(terminateBtn, Color3.fromRGB(121, 131, 245))
+terminateBtn.MouseEnter:Connect(function() killStroke.Color = Color3.fromRGB(190, 197, 255) end)
+terminateBtn.MouseLeave:Connect(function() killStroke.Color = Color3.fromRGB(121, 131, 245) end)
 
 -- RIGHT COLUMN: NODE + CLEAR NODE CARDS
 local function createCard(title, y, height)
@@ -3453,6 +3657,7 @@ local function createCard(title, y, height)
     card.Parent = body
     round(card, 12)
     stroke(card)
+    polish(card)
     local dot = Instance.new("Frame")
     dot.Size = UDim2.new(0, 4, 0, 18)
     dot.Position = UDim2.new(0, 16, 0, 14)
@@ -3460,6 +3665,10 @@ local function createCard(title, y, height)
     dot.BorderSizePixel = 0
     dot.Parent = card
     round(dot, 2)
+    local dotGlow = stroke(dot, T.accent2, 2)
+    dotGlow.Transparency = 0.6
+    UI.rightCards = UI.rightCards or {}
+    table.insert(UI.rightCards, card)
     local titleText = makeText(card, title, 16, T.text, Enum.Font.GothamBold)
     titleText.Size = UDim2.new(1, -60, 0, 24)
     titleText.Position = UDim2.new(0, 28, 0, 11)
@@ -3515,7 +3724,7 @@ UI.nodeTotalLabel.Position = UDim2.new(0, 128, 0, 144)
 UI.nodeTotalLabel:GetPropertyChangedSignal("Text"):Connect(UI.refreshRecInfo)
 UI.refreshRecInfo()
 
--- KEY VALID TIMER: how long the current key stays valid, set by fetchKeyExpiry() in the key screen
+-- KEY VALID TIMER: how long the current key stays valid, set by KEY.fetchExpiry() in the key screen
 -- (global NCL_KeyExpiresAt - unix timestamp, 0 = lifetime, nil = unknown/not reported by the key
 -- server). Lives in the Path card so it's visible on the same page as the rest of the run status.
 -- Refreshed every 30s since minute-level granularity is enough for a countdown like this.
@@ -4007,6 +4216,7 @@ runMacroBtn.MouseButton1Click:Connect(function()
         -- replay until the next death. Reset them here too, not just in setupCharacterConstraints.
         hasReplayedFromTime = false
         hasSentStageLoss = false
+        UI.stageLossZeroSeenAt = nil
         UI.stageTimerArmed = false
         partyWasFull = false
         runStartTime = os.clock()
@@ -4075,6 +4285,8 @@ SETTINGS.MaxNodeDistance = cfg.MaxNodeDistance or SETTINGS.MaxNodeDistance
 SETTINGS.WallRayLength = cfg.WallRayLength or SETTINGS.WallRayLength
 SETTINGS.Webhook = cfg.Webhook or ""
 if cfg.WebhookLogo ~= nil then SETTINGS.WebhookLogo = tostring(cfg.WebhookLogo) end
+if cfg.PartyLeavePing ~= nil then SETTINGS.PartyLeavePing = tostring(cfg.PartyLeavePing) end
+if cfg.PartyLeavePingEnabled ~= nil then SETTINGS.PartyLeavePingEnabled = cfg.PartyLeavePingEnabled end
 SETTINGS.IgnoreKeywords = cfg.IgnoreKeywords or SETTINGS.IgnoreKeywords
 
 SETTINGS.AutoLobbyEnabled = true -- always on; a saved/imported config cannot turn it off
@@ -4147,6 +4359,7 @@ end
 if cfg.AcceptUsername ~= nil then SETTINGS.AcceptUsername = tostring(cfg.AcceptUsername) end
 if cfg.TradeUsername ~= nil then SETTINGS.TradeUsername = tostring(cfg.TradeUsername) end
 SETTINGS.AutoSellEnabled = cfg.AutoSellEnabled or false
+SETTINGS.AutoSellForBot = cfg.AutoSellForBot or false
 
 if cfg.GameplayMode then SETTINGS.GameplayMode = cfg.GameplayMode end
 SETTINGS.ReplayOnDisconnect = true -- always on
@@ -4186,6 +4399,11 @@ if UI.filterInput then UI.filterInput.Text = SETTINGS.IgnoreKeywords end
 if UI.joinNameInput then UI.joinNameInput.Text = SETTINGS.JoinPlayerName end
 if UI.webhookInput then UI.webhookInput.Text = SETTINGS.Webhook or "" end
 if UI.webhookLogoInput then UI.webhookLogoInput.Text = SETTINGS.WebhookLogo or "" end
+if UI.partyLeavePingInput then UI.partyLeavePingInput.Text = SETTINGS.PartyLeavePing or "" end
+if UI.partyLeavePingRow then
+    UI.partyLeavePingRow.Text = "Ping on Party Leave: " .. (SETTINGS.PartyLeavePingEnabled and "ON" or "OFF")
+    UI.partyLeavePingRow.BackgroundColor3 = SETTINGS.PartyLeavePingEnabled and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
+end
 
 if UI.autoLobbyRow then
     UI.autoLobbyRow.Text = "Auto Lobby Routine: " .. (SETTINGS.AutoLobbyEnabled and "ON" or "OFF")
@@ -4206,6 +4424,10 @@ if UI.diffDropdown then UI.diffDropdown:SetValue(SETTINGS.LobbyDifficulty) end
 if UI.autoSellToggleBtn then
     UI.autoSellToggleBtn.Text = "Auto Sell: " .. (SETTINGS.AutoSellEnabled and "ON" or "OFF")
     UI.autoSellToggleBtn.BackgroundColor3 = SETTINGS.AutoSellEnabled and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
+end
+if UI.autoSellBotToggleBtn then
+    UI.autoSellBotToggleBtn.Text = "AUTO SELL FOR BOT: " .. (SETTINGS.AutoSellForBot and "ON" or "OFF")
+    UI.autoSellBotToggleBtn.BackgroundColor3 = SETTINGS.AutoSellForBot and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
 end
 if UI.hcRow then
     UI.hcRow.Text = "Hardcore Mode: " .. (SETTINGS.LobbyHardcore and "ON" or "OFF")
@@ -4627,6 +4849,7 @@ hasReturnedToLobby = false
 partyWasFull = false
 hasReplayedFromTime = false
 hasSentStageLoss = false
+UI.stageLossZeroSeenAt = nil
 UI.stageTimerArmed = false
 characterSpawnTime = os.clock()
 postDodgeHoldUntil = 0
@@ -4860,12 +5083,26 @@ if child:IsA("DataModelMesh") or child:IsA("Decal") or child:IsA("SurfaceGui") t
     return
 end
 handleInviswall(child)
+-- Hazards only exist inside a dungeon: binding 3 persistent GetPropertyChangedSignal connections
+-- to every BasePart (including static lobby scenery, which can be thousands of parts) leaves a huge
+-- pile of live connections idling in the lobby for no reason - and that's exactly what's still alive
+-- when a real place teleport (joining a stage) starts tearing the DataModel down, which is enough to
+-- crash some mobile executors mid-teleport. Skip tracking entirely while in the lobby.
 if child:IsA("BasePart") then
-evaluateAndAddHazardPart(child); bindHazardEvents(child)
+if not isInLobby() then evaluateAndAddHazardPart(child); bindHazardEvents(child) end
 elseif child:IsA("Model") or child:IsA("Folder") then
-for _, desc in ipairs(child:GetDescendants()) do
+-- a dungeon load parents in one Model with thousands of parts at once; processing them all
+-- synchronously here (hazard score + 3 connects each) can freeze the frame long enough for a
+-- mobile executor to get watchdog-killed. Chunk it, same pattern as UI.scanScenery.
+if not isInLobby() then
+task.spawn(function()
+for i, desc in ipairs(child:GetDescendants()) do
+if isCleaningUp then return end
 if desc:IsA("BasePart") then handleInviswall(desc); evaluateAndAddHazardPart(desc); bindHazardEvents(desc)
 elseif desc:IsA("Humanoid") then trackedHumanoids[desc] = true end
+if i % 150 == 0 then task.wait() end
+end
+end)
 end
 end
 if child:IsA("Humanoid") then trackedHumanoids[child] = true end
@@ -5004,6 +5241,7 @@ function UI.applyLightingBoost(on)
             pcall(function() UI.lightSaved.Quality = settings().Rendering.QualityLevel end)
             if terrain then
                 UI.lightSaved.Water = { terrain.WaterWaveSize, terrain.WaterWaveSpeed, terrain.WaterReflectance, terrain.WaterTransparency }
+                UI.lightSaved.Decoration = terrain.Decoration
             end
         end
         pcall(function() Lighting.GlobalShadows = false; Lighting.FogEnd = 1e9 end)
@@ -5011,6 +5249,7 @@ function UI.applyLightingBoost(on)
         pcall(function()
             if terrain then
                 terrain.WaterWaveSize, terrain.WaterWaveSpeed, terrain.WaterReflectance, terrain.WaterTransparency = 0, 0, 0, 0
+                terrain.Decoration = false -- turns off grass tufts/foliage on the ground; ground shape/collision untouched
             end
         end)
         for _, fx in ipairs(Lighting:GetDescendants()) do pcall(UI.disableEffect, fx) end
@@ -5025,6 +5264,7 @@ function UI.applyLightingBoost(on)
                     terrain.WaterWaveSize, terrain.WaterWaveSpeed, terrain.WaterReflectance, terrain.WaterTransparency = unpack(s.Water)
                 end
             end)
+            pcall(function() if terrain and s.Decoration ~= nil then terrain.Decoration = s.Decoration end end)
             UI.lightSaved = nil
             pcall(function() if setfpscap then setfpscap(60) end end)
         end
@@ -6210,6 +6450,7 @@ if isInLobby() then
     -- handleLobbyAutomation and breaks follow-host on the 2nd+ host-leave cycle.
     hasReturnedToLobby = false
     hasSentStageLoss = false
+    UI.stageLossZeroSeenAt = nil
     UI.stageTimerArmed = false
     hasReplayedFromTime = false
     partyWasFull = false
@@ -6222,6 +6463,23 @@ end
 -- nothing keeps firing replay/attack/webhook logic while we wait to actually land back in the lobby.
 if hasReturnedToLobby then return end
 
+-- NEW ATTEMPT DETECTION: the game recreates Workspace.dungeonName as a fresh Instance whenever a
+-- dungeon attempt (re)starts, including a MANUAL replay the player triggers in-game (not just the
+-- script's own fireReplayDungeonRemote). That path never goes through isInLobby(), so the stage-loss
+-- flags never get reset there and stale state can misfire on the new attempt's timer. Catch it here
+-- by identity, not value (replaying the same dungeon keeps the same name text).
+do
+    local dObj = Workspace:FindFirstChild("dungeonName")
+    if dObj and UI.lastDungeonNameObj and dObj ~= UI.lastDungeonNameObj then
+        hasSentStageLoss = false
+        UI.stageLossZeroSeenAt = nil
+        UI.stageTimerArmed = false
+        runStartTime = os.clock()
+        UI.suppressPartyLeaveUntil = os.clock() + 6
+    end
+    UI.lastDungeonNameObj = dObj
+end
+
 -- STAGE LOSS: fires once per dungeon attempt when the countdown timer hits 0:00
 if not hasSentStageLoss then
     local timeGui = player:FindFirstChild("PlayerGui") and player.PlayerGui:FindFirstChild("timeLeftGui")
@@ -6231,12 +6489,18 @@ if not hasSentStageLoss then
         -- a fresh dungeon's timer GUI can still show a stale "0:00" left over from the previous attempt for a
         -- moment after a win/replay; only trust a 0 reading once we've actually seen the timer running (>0) or
         -- a few seconds have passed, so a just-won run never gets misreported as a loss.
-        if secs ~= nil and secs > 0 then UI.stageTimerArmed = true end
+        if secs ~= nil and secs > 0 then UI.stageTimerArmed = true; UI.stageLossZeroSeenAt = nil end
         if secs ~= nil and secs <= 0 and (UI.stageTimerArmed or (os.clock() - runStartTime) > 10) then
-            hasSentStageLoss = true
-            setStatus("Status: Time ran out - Stage Loss!", true)
-            pcall(warn, "[Webhook] time hit zero (\"" .. tostring(timeFrame.Text) .. "\") - sending STAGE LOSS webhook")
-            sendStageLossWebhook()
+            -- a real win can reset the timer GUI to 0:00 a moment before the cloneRewardGui remote
+            -- (which sets hasSentStageLoss = true) actually arrives from the server; require the 0
+            -- reading to hold for a bit so the win event has time to land and cancel this first.
+            if not UI.stageLossZeroSeenAt then UI.stageLossZeroSeenAt = os.clock() end
+            if os.clock() - UI.stageLossZeroSeenAt >= 2 then
+                hasSentStageLoss = true
+                setStatus("Status: Time ran out - Stage Loss!", true)
+                pcall(warn, "[Webhook] time hit zero (\"" .. tostring(timeFrame.Text) .. "\") - sending STAGE LOSS webhook")
+                sendStageLossWebhook()
+            end
         end
     end
 end
@@ -7334,23 +7598,23 @@ local KEY = {
 }
 
 -- Luarmor SDK: fetched once and reused, so keys stay in sync with the Luarmor dashboard instead of a hardcoded list
-local luarmorApi
-local function getLuarmorApi()
-    if luarmorApi then return luarmorApi end
+-- (folded onto KEY instead of separate top-level locals - the chunk is already near Luau's 200-local limit)
+function KEY.getApi()
+    if KEY.api then return KEY.api end
     local ok, result = pcall(function()
         local sdk = loadstring(game:HttpGet("https://sdkapi-public.luarmor.net/library.lua"))()
         sdk.script_id = KEY.ScriptId
         return sdk
     end)
-    if ok then luarmorApi = result end
-    return luarmorApi
+    if ok then KEY.api = result end
+    return KEY.api
 end
 
-local function keyIsValid(input)
+function KEY.isValid(input)
     input = tostring(input or ""):match("^%s*(.-)%s*$")
     if input == "" then return false, "Enter a key first" end
 
-    local api = getLuarmorApi()
+    local api = KEY.getApi()
     if not api then return false, "Could not reach the key server" end
 
     local ok, status = pcall(api.check_key, input)
@@ -7372,8 +7636,8 @@ end
 -- document a stable field name for this, so a handful of common ones are checked; if none are present
 -- the timer stays blank instead of showing a made-up number. Returns nil (unknown), 0 (lifetime key,
 -- never expires) or a unix timestamp.
-local function fetchKeyExpiry(key)
-    local api = getLuarmorApi()
+function KEY.fetchExpiry(key)
+    local api = KEY.getApi()
     if not api or not api.get_user_data then return nil end
     local ok, data = pcall(api.get_user_data, key)
     if not ok or type(data) ~= "table" then return nil end
@@ -7383,19 +7647,17 @@ local function fetchKeyExpiry(key)
     return nil
 end
 
--- set (globally, no `local`) once a key is accepted, so Luarmor's own runtime can read it after
--- LRM_INIT_SCRIPT returns; keyAccepted is what the blocking wait loop below watches
-local keyAccepted = false
-
+-- KEY.accepted (folded from a top-level local - see the note above getLuarmorApi) is what the
+-- blocking wait loop below watches
 local function showKeySystem()
-    if not KEY.Required then keyAccepted = true; return end
+    if not KEY.Required then KEY.accepted = true; return end
 
     local saved
     pcall(function() if isfile and isfile(KEY.File) then saved = readfile(KEY.File) end end)
-    if saved and keyIsValid(saved) then
+    if saved and KEY.isValid(saved) then
         script_key = saved
-        NCL_KeyExpiresAt = fetchKeyExpiry(saved)
-        keyAccepted = true
+        NCL_KeyExpiresAt = KEY.fetchExpiry(saved)
+        KEY.accepted = true
         return
     end
 
@@ -7556,14 +7818,14 @@ local function showKeySystem()
         setState("busy", "Validating key...", "Please wait a moment.")
         task.spawn(function()
             task.wait(0.5)
-            local ok, err = keyIsValid(input.Text)
+            local ok, err = KEY.isValid(input.Text)
             if closed then return end
             if ok then
                 local finalKey = input.Text:match("^%s*(.-)%s*$")
                 pcall(function()
                     if writefile then writefile(KEY.File, finalKey) end
                 end)
-                NCL_KeyExpiresAt = fetchKeyExpiry(finalKey)
+                NCL_KeyExpiresAt = KEY.fetchExpiry(finalKey)
                 local expiryText = (NCL_KeyExpiresAt == nil and "Loading menu...")
                     or (NCL_KeyExpiresAt == 0 and "Lifetime key - loading menu...")
                     or ("Expires " .. os.date("%Y-%m-%d", NCL_KeyExpiresAt) .. " - loading menu...")
@@ -7574,7 +7836,7 @@ local function showKeySystem()
                 gui:Destroy()
                 UI.keyGui = nil
                 script_key = finalKey
-                keyAccepted = true
+                KEY.accepted = true
             else
                 setState("bad", err or "Invalid key", "Check your key and try again.")
                 busy = false
@@ -8035,10 +8297,20 @@ if LRM_INIT_SCRIPT then
     end)
 else
     showKeySystem()
-    while not keyAccepted do task.wait() end
+    while not KEY.accepted do task.wait() end
 end
 
-buildInterface()
+local buildOk, buildErr = pcall(buildInterface)
+if not buildOk then
+    warn("[NCL HUB] buildInterface failed: " .. tostring(buildErr))
+    pcall(function()
+        game:GetService("StarterGui"):SetCore("SendNotification", {
+            Title = "NCL HUB - menu error",
+            Text = tostring(buildErr):sub(1, 180),
+            Duration = 15,
+        })
+    end)
+end
 loadConfigAndAutoExecute()
 UI.startAutoTrade()
 UI.startAutoAccept()
