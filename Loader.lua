@@ -1259,11 +1259,34 @@ pcall(function() promptOverlay = CoreGui:WaitForChild("RobloxPromptGui", 3):Wait
 
 if promptOverlay then
     local conn = promptOverlay.ChildAdded:Connect(function(child)
-        if SETTINGS.RejoinOnDisconnect and child.Name == "ErrorPrompt" then
-            task.wait(1.5)
-            local TeleportService = game:GetService("TeleportService")
-            pcall(function() TeleportService:Teleport(MAIN_LOBBY_PLACE_ID) end)
-        end
+        if not SETTINGS.RejoinOnDisconnect or child.Name ~= "ErrorPrompt" then return end
+        task.wait(1.5)
+        -- an ErrorPrompt fires for plenty of non-disconnect reasons too (content load
+        -- failures, age gate, rate limits, moderation) - forcing a Teleport on top of ANY
+        -- of those, especially while the client may already be mid-way through its own
+        -- native close/disconnect sequence, is what made the game "leave itself" back to
+        -- the Roblox menu instead of cleanly rejoining (worse on slower/less stable
+        -- executors like Delta, where these prompts surface more often from lag). Only
+        -- act on prompts whose own text actually says this is a connection problem, and
+        -- only once the prompt has stuck around for a bit (a prompt that disappears on
+        -- its own within the wait was transient/benign, not a real disconnect).
+        if not child.Parent then return end
+        local isDisconnect = false
+        pcall(function()
+            for _, d in ipairs(child:GetDescendants()) do
+                if d:IsA("TextLabel") or d:IsA("TextButton") then
+                    local t = d.Text:lower()
+                    if t:find("disconnect", 1, true) or t:find("lost connection", 1, true)
+                        or t:find("connection was lost", 1, true) or t:find("reconnect", 1, true) then
+                        isDisconnect = true
+                        break
+                    end
+                end
+            end
+        end)
+        if not isDisconnect then return end
+        local TeleportService = game:GetService("TeleportService")
+        pcall(function() TeleportService:Teleport(MAIN_LOBBY_PLACE_ID) end)
     end)
     table.insert(connections, conn)
 end
@@ -7350,8 +7373,13 @@ function UI.startAutoReady()
     task.spawn(function()
         local pressedFor = nil
         while not isCleaningUp do
-            task.wait(0.2)
-            if isBossRaidStage() then
+            task.wait(0.5)
+            -- was scanning the whole PlayerGui tree 5x/s unconditionally (even in lobby, even with
+            -- autoplay off) - that full GetDescendants() walk is what made slower executors (e.g. Delta)
+            -- lag noticeably more than faster ones. Boss raid only ever shows up mid-dungeon during autoplay.
+            if not isAutoplay or isInLobby() then
+                pressedFor = nil
+            elseif isBossRaidStage() then
                 local pGui = player:FindFirstChild("PlayerGui")
                 local btn
                 for _, obj in ipairs(pGui and pGui:GetDescendants() or {}) do
