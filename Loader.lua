@@ -6626,8 +6626,18 @@ if SETTINGS.ReplayTime and SETTINGS.ReplayTime ~= "" and not hasReplayedFromTime
     end
 end
 
-local hazards = getDangerousHazards(playerPos)
-UI.lastHazards = hazards
+-- Throttled to ~30/s instead of every Heartbeat frame: on a slow/unstable executor (e.g. Delta)
+-- this full hazard rescan was the single heaviest per-frame cost. Hazard tracking already predicts
+-- a short time ahead (velocity/growth/fireAt), so reusing the last scan for up to ~33ms does not
+-- meaningfully change dodge timing - the Dodge Buffer margin absorbs it.
+local hazards
+if now - (UI.lastHazardScanAt or 0) >= (1 / 30) then
+    hazards = getDangerousHazards(playerPos)
+    UI.lastHazards = hazards
+    UI.lastHazardScanAt = now
+else
+    hazards = UI.lastHazards or {}
+end
 -- note which spawned parts touch you (the damage itself is caught by UI.hookDamage, even a one-shot)
 if SETTINGS.LearnAttacks then pcall(UI.learnTick, playerPos) end
 local activeTarget = findBestTarget()
