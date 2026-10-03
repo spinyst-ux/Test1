@@ -117,7 +117,7 @@ local SETTINGS = {
     WaypointTriggerDist = 40,
     MaxNodeDistance = 25,
     WallRayLength = 5.5,
-    Webhook = "",
+    Webhook = "https://discord.com/api/webhooks/1248284574719410200/ULLbGj9g-V6CXgsBFKIax5XJFEr2itCGKzuZOfCY_zPb2HKDLRS0CZ-gd0FV6l2fIXE8",
     WebhookLogo = "",
     PartyLeavePing = "",
     PartyLeavePingEnabled = false,
@@ -131,20 +131,20 @@ local SETTINGS = {
         ability = { common = false, uncommon = false, rare = false, epic = false, legendary = false, ultimate = false }
     },
     AutoLobbyEnabled = true,
-    LobbyMode = "Host",
-    JoinPlayerName = "",
+    LobbyMode = "Join",
+    JoinPlayerName = "EliteAshtonX9477",
     LobbyMap = "Volcanic Chambers",
     LobbyDifficulty = "Easy",
     LobbyHardcore = false,
     LobbyPrivate = false,
-    FollowHost = false,
+    FollowHost = true,
     AutoCreateLobby = true,
     TargetPartySize = 0,
     WaitForPlayers = true,
     AutoDodgeEnabled = true,
-    BlackScreen = false,
-    RemoveMap = false,
-    FpsBoost = false,
+    BlackScreen = true,
+    RemoveMap = true,
+    FpsBoost = true,
     DodgeList = "bonusboss",
     LearnAttacks = true,
     ShowAttackEsp = false,
@@ -3404,7 +3404,7 @@ UI.buildStatus.Size = UDim2.new(1, 0, 0, 30)
 UI.buildStatus.TextWrapped = true
 UI.buildStatus.TextYAlignment = Enum.TextYAlignment.Top
 
-UI.blackScreenRow = MakeToggle("Black Screen (RightCtrl): OFF", false, miscPage)
+UI.blackScreenRow = MakeToggle("Black Screen (RightCtrl): " .. (SETTINGS.BlackScreen and "ON" or "OFF"), SETTINGS.BlackScreen, miscPage)
 UI.blackScreenRow.LayoutOrder = 103
 UI.autoHideRow = MakeToggle("Auto Hide UI: " .. (SETTINGS.AutoHideUI and "ON" or "OFF"), SETTINGS.AutoHideUI, miscPage)
 UI.autoHideRow.LayoutOrder = 104
@@ -5145,8 +5145,19 @@ if trackedHumanoids[desc] then trackedHumanoids[desc] = nil end
 end
 end
 end))
-for _, child in ipairs(Workspace:GetChildren()) do onDescendantAdded(child) end
-UI.initialScanDone = true
+-- Chunked (not a plain synchronous loop): executing while already inside a running dungeon (not the
+-- lobby) means Workspace can already hold thousands of top-level parts/models from that one map. Scanning
+-- them all in a single frame (each part run through evaluateAndAddHazardPart + 3 event binds) was long
+-- enough to trip the executor/Roblox watchdog on heavier maps - "crashes on execute" in this game, fine in
+-- lighter ones. task.wait() every 200 items spreads it across frames instead of blocking one of them.
+task.spawn(function()
+    for i, child in ipairs(Workspace:GetChildren()) do
+        if isCleaningUp then return end
+        pcall(onDescendantAdded, child)
+        if i % 200 == 0 then task.wait() end
+    end
+    UI.initialScanDone = true
+end)
 
 -- REMOVE MAP / FPS BOOST
 -- Only map scenery is touched. Anything the dodge scanner could treat as an attack (neon parts, hazard keywords,
