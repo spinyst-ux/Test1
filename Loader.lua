@@ -111,6 +111,7 @@ local SETTINGS = {
     EIFSpammerEnabled = false,
     EIFSpammerSlot = "E",
     EIFSpammerDelay = 0.5,
+    AutoBuyGamepass = true,
     DodgeBuffer = 3.5,
     DodgeBoostStuds = 6,        -- 0-10 studs of "burst" speed a dodge may spend before slowing to a normal walk
     ShowDodgeBoostBar = true,   -- HUD bar showing how much burst the dodge boost pool has left
@@ -1313,6 +1314,7 @@ CustomTargetExtraRange = SETTINGS.CustomTargetExtraRange,
 EIFSpammerEnabled = SETTINGS.EIFSpammerEnabled,
 EIFSpammerSlot = SETTINGS.EIFSpammerSlot,
 EIFSpammerDelay = SETTINGS.EIFSpammerDelay,
+AutoBuyGamepass = SETTINGS.AutoBuyGamepass,
 DodgeBuffer = SETTINGS.DodgeBuffer,
 DodgeBoostStuds = SETTINGS.DodgeBoostStuds,
 ShowDodgeBoostBar = SETTINGS.ShowDodgeBoostBar,
@@ -3463,6 +3465,9 @@ UI.eifToggleBtn = MakeToggle("EIF Spammer: " .. (SETTINGS.EIFSpammerEnabled and 
 UI.eifSlotBtn = MakeButton("EIF Slot: " .. SETTINGS.EIFSpammerSlot:upper(), Color3.fromRGB(58, 80, 200), miscPage)
 UI.eifDelayInput = MakeSettingRow("EIF Spam Delay (s):", SETTINGS.EIFSpammerDelay, miscPage)
 
+UI.autoBuyGamepassRow = MakeToggle("Auto Buy Gamepass: " .. (SETTINGS.AutoBuyGamepass and "ON" or "OFF"), SETTINGS.AutoBuyGamepass, miscPage)
+local autoBuyGamepassNote = makeText(miscPage, "Buys from the shop's 4 cards in order of priority (x2 Gold > Extra Item > VIP > Free Stat Resets) whenever you can afford the next one.", 12, T.muted, Enum.Font.Gotham)
+
 -- AUTO-SELL TAB (.sc cards from ncl-all-tabs.html: one card per category,
 -- six rarity pills laid out 3 columns x 2 rows, tinted with the rarity colour when active)
 UI.autoSellBotToggleBtn = MakeToggle("AUTO SELL FOR BOT: " .. (SETTINGS.AutoSellForBot and "ON" or "OFF"), SETTINGS.AutoSellForBot, sellPage)
@@ -3943,6 +3948,9 @@ end
 local function toggleAutoHide()
     SETTINGS.AutoHideUI = not SETTINGS.AutoHideUI
     UI.refreshAutoHideBtns()
+    -- apply immediately if autoplay is already running, instead of waiting for the next
+    -- Run Script press / auto-resume - that's the only place this setting used to take effect
+    if SETTINGS.AutoHideUI and isAutoplay then UI.setMinimized(true) end
     saveConfig()
 end
 UI.autoHideRow.MouseButton1Click:Connect(toggleAutoHide)
@@ -4017,6 +4025,13 @@ UI.eifToggleBtn.MouseButton1Click:Connect(function()
     SETTINGS.EIFSpammerEnabled = not SETTINGS.EIFSpammerEnabled
     UI.eifToggleBtn.Text = "EIF Spammer: " .. (SETTINGS.EIFSpammerEnabled and "ON" or "OFF")
     UI.eifToggleBtn.BackgroundColor3 = SETTINGS.EIFSpammerEnabled and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
+    saveConfig()
+end)
+
+UI.autoBuyGamepassRow.MouseButton1Click:Connect(function()
+    SETTINGS.AutoBuyGamepass = not SETTINGS.AutoBuyGamepass
+    UI.autoBuyGamepassRow.Text = "Auto Buy Gamepass: " .. (SETTINGS.AutoBuyGamepass and "ON" or "OFF")
+    UI.autoBuyGamepassRow.BackgroundColor3 = SETTINGS.AutoBuyGamepass and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
     saveConfig()
 end)
 
@@ -4299,6 +4314,7 @@ SETTINGS.IgnoreEnemyNames = cfg.IgnoreEnemyNames or SETTINGS.IgnoreEnemyNames
 if cfg.EIFSpammerEnabled ~= nil then SETTINGS.EIFSpammerEnabled = cfg.EIFSpammerEnabled end
 if cfg.EIFSpammerSlot then SETTINGS.EIFSpammerSlot = cfg.EIFSpammerSlot end
 if cfg.EIFSpammerDelay ~= nil then SETTINGS.EIFSpammerDelay = cfg.EIFSpammerDelay end
+if cfg.AutoBuyGamepass ~= nil then SETTINGS.AutoBuyGamepass = cfg.AutoBuyGamepass end
 
 SETTINGS.DodgeBuffer = cfg.DodgeBuffer or SETTINGS.DodgeBuffer
 SETTINGS.DodgeBoostStuds = cfg.DodgeBoostStuds or SETTINGS.DodgeBoostStuds
@@ -4498,6 +4514,10 @@ if UI.eifToggleBtn then
     UI.eifToggleBtn.BackgroundColor3 = SETTINGS.EIFSpammerEnabled and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
 end
 if UI.eifSlotBtn then UI.eifSlotBtn.Text = "EIF Slot: " .. SETTINGS.EIFSpammerSlot:upper() end
+if UI.autoBuyGamepassRow then
+    UI.autoBuyGamepassRow.Text = "Auto Buy Gamepass: " .. (SETTINGS.AutoBuyGamepass and "ON" or "OFF")
+    UI.autoBuyGamepassRow.BackgroundColor3 = SETTINGS.AutoBuyGamepass and Color3.fromRGB(40, 150, 70) or Color3.fromRGB(28, 34, 62)
+end
 
 updateIgnoreKeywords()
 updateIgnoreEnemyNames()
@@ -7543,6 +7563,103 @@ local function realClickButton(btn, attempt)
     end
     return false
 end
+
+-- AUTO BUY GAMEPASS: the shop's 4 cards (VIP / x2 Gold / Extra Item / Free Stat Resets) are plain
+-- GUI buttons priced in in-game Gold, not Robux passes, so a normal GUI click buys them outright.
+-- Wrapped in `do...end` (like the auto-sell block above) so these locals free their registers
+-- once the task.spawn loop is created, instead of permanently eating into the 200-local budget.
+do
+local GAMEPASS_PRIORITY = { "x2 Gold", "Extra Item", "VIP", "Free Stat Resets" }
+local CONFIRM_BUTTON_TEXTS = { confirm = true, yes = true, buy = true, purchase = true, ok = true }
+
+-- "40.0M" / "1,234" -> number. Mirrors abbreviateNumber's K/M/B/T/Q units in reverse.
+local function parseAbbrevPrice(text)
+    local numStr, unit = tostring(text or ""):match("([%d%.,]+)%s*([KMBTQkmbtq]?)%s*$")
+    if not numStr then return nil end
+    local n = tonumber((numStr:gsub(",", "")))
+    if not n then return nil end
+    local mult = { K = 1e3, M = 1e6, B = 1e9, T = 1e12, Q = 1e15 }
+    if unit ~= "" then n = n * (mult[unit:upper()] or 1) end
+    return n
+end
+
+-- finds the shop card whose title label reads `label` exactly (e.g. "x2 Gold"), returns
+-- (clickable button, the card's frame, the title label) or nil if the shop isn't open.
+local function findShopCard(label)
+    local pGui = player:FindFirstChild("PlayerGui")
+    if not pGui then return nil end
+    local wanted = label:lower()
+    for _, obj in ipairs(pGui:GetDescendants()) do
+        if obj:IsA("TextLabel") and obj.Text:lower():match("^%s*(.-)%s*$") == wanted then
+            local frame = obj:FindFirstAncestorOfClass("Frame") or obj:FindFirstAncestorOfClass("ImageButton")
+            local cur, btn = obj.Parent, nil
+            for _ = 1, 5 do
+                if not cur then break end
+                if cur:IsA("GuiButton") then btn = cur break end
+                cur = cur.Parent
+            end
+            if not btn and frame then
+                for _, d in ipairs(frame:GetDescendants()) do
+                    if d:IsA("GuiButton") then btn = d break end
+                end
+            end
+            if btn then return btn, frame, obj end
+        end
+    end
+    return nil
+end
+
+-- price label inside a card: any other TextLabel reading like "40.0M" / "1,234".
+local function findCardPrice(frame, titleLabel)
+    if not frame then return nil end
+    for _, d in ipairs(frame:GetDescendants()) do
+        if d:IsA("TextLabel") and d ~= titleLabel then
+            local price = parseAbbrevPrice(d.Text:match("^%s*(.-)%s*$"))
+            if price then return price end
+        end
+    end
+    return nil
+end
+
+local function clickConfirmPopupIfAny(pGui)
+    task.wait(0.3)
+    for _, obj in ipairs(pGui:GetDescendants()) do
+        if obj:IsA("TextButton") and CONFIRM_BUTTON_TEXTS[obj.Text:lower():match("^%s*(.-)%s*$")] then
+            pressGuiButton(obj)
+            return
+        end
+    end
+end
+
+-- one pass: buys at most the single highest-priority card it can currently afford, then returns
+-- (re-evaluated from the top every pass, so priority order holds even as prices scale with level).
+local function tryAutoBuyGamepass()
+    local pGui = player:FindFirstChild("PlayerGui")
+    if not pGui then return end
+    local gold = findPlayerStat({ "Gold", "gold", "Coins", "Money" })
+    if not gold then return end
+    for _, label in ipairs(GAMEPASS_PRIORITY) do
+        local btn, frame, titleLabel = findShopCard(label)
+        if btn then
+            local price = findCardPrice(frame, titleLabel)
+            if price and gold >= price then
+                pressGuiButton(btn)
+                realClickButton(btn, 1)
+                clickConfirmPopupIfAny(pGui)
+                pcall(warn, "[AutoBuyGamepass] bought: " .. label)
+                return
+            end
+        end
+    end
+end
+
+task.spawn(function()
+    while not isCleaningUp do
+        if SETTINGS.AutoBuyGamepass then pcall(tryAutoBuyGamepass) end
+        task.wait(3)
+    end
+end)
+end -- AUTO BUY GAMEPASS
 
 function UI.applyBuild(statName, buildName)
     if UI.buildBusy then return end
