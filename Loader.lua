@@ -123,13 +123,16 @@ local SETTINGS = {
     PartyLeavePing = "",
     PartyLeavePingEnabled = false,
     IgnoreKeywords = "ring1, ring2, ring3, ring4, ring5, ring6",
-    AutoSellEnabled = false,
-    AutoSellForBot = false,
+    AutoSellEnabled = true,
+    AutoSellForBot = true,
+    -- matches what clicking "AUTO SELL FOR BOT: ON" does at runtime (common/uncommon/rare/epic sold,
+    -- legendary/ultimate kept) - set here too so AutoSellForBot=true above is correct from a cold
+    -- start, not just once the toggle is clicked in the UI.
     AutoSellConfig = {
-        weapon = { common = false, uncommon = false, rare = false, epic = false, legendary = false, ultimate = false },
-        helmet = { common = false, uncommon = false, rare = false, epic = false, legendary = false, ultimate = false },
-        chest = { common = false, uncommon = false, rare = false, epic = false, legendary = false, ultimate = false },
-        ability = { common = false, uncommon = false, rare = false, epic = false, legendary = false, ultimate = false }
+        weapon = { common = true, uncommon = true, rare = true, epic = true, legendary = false, ultimate = false },
+        helmet = { common = true, uncommon = true, rare = true, epic = true, legendary = false, ultimate = false },
+        chest = { common = true, uncommon = true, rare = true, epic = true, legendary = false, ultimate = false },
+        ability = { common = true, uncommon = true, rare = true, epic = true, legendary = false, ultimate = false }
     },
     AutoLobbyEnabled = true,
     LobbyMode = "Join",
@@ -152,7 +155,7 @@ local SETTINGS = {
     LearnedAttacks = {},
     LearnedAnims = {},   -- boss attack animation id -> { d = seconds until it hits, r = reach in studs }
     ShowRangeCircle = false,
-    AutoHideUI = false,
+    AutoHideUI = true,
     CustomName = "",
     RenameParty = true,
     LogoAvatar = true,
@@ -7583,70 +7586,268 @@ local function parseAbbrevPrice(text)
     return n
 end
 
--- finds the shop card whose title label reads `label` exactly (e.g. "x2 Gold"), returns
--- (clickable button, the card's frame, the title label) or nil if the shop isn't open.
-local function findShopCard(label)
+-- true only for something actually on screen right now: every GuiObject ancestor up to PlayerGui
+-- must be Visible and every ScreenGui ancestor Enabled. CRITICAL for this feature specifically -
+-- this shop keeps every tab's cards instantiated and just toggles Visible per tab, so without this
+-- check a card on a HIDDEN tab still "matches" and still reports an on-screen AbsolutePosition
+-- (Roblox keeps a hidden GuiObject's last layout position) - clicking that position fires a
+-- synthetic click into whatever tab IS actually visible there instead, which is how this ended up
+-- clicking a real paid item on the Featured tab and raising a purchase-confirmation prompt.
+local function isShownOnScreen(pGui, obj)
+    local cur = obj
+    while cur and cur ~= pGui do
+        if cur:IsA("GuiObject") and not cur.Visible then return false end
+        if cur:IsA("ScreenGui") and not cur.Enabled then return false end
+        cur = cur.Parent
+    end
+    return obj.AbsoluteSize.X > 0 and obj.AbsoluteSize.Y > 0
+end
+
+-- price inside a card: the LARGEST number among its labels (the real Gold price is always far
+-- bigger than any small badge like "x2"/"+1" or a crossed-out Robux price like "799").
+local function findCardPrice(frame, titleLabel)
+    if not frame then return nil end
+    local best
+    for _, d in ipairs(frame:GetDescendants()) do
+        if (d:IsA("TextLabel") or d:IsA("TextButton")) and d ~= titleLabel then
+            local price = parseAbbrevPrice(d.Text:match("^%s*(.-)%s*$"))
+            if price and (not best or price > best) then best = price end
+        end
+    end
+    return best
+end
+
+-- climbs from a matched label to (a clickable button, the card's frame)
+local function resolveCardClickTarget(obj)
+    local cur, btn = obj.Parent, nil
+    for _ = 1, 8 do
+        if not cur then break end
+        if cur:IsA("GuiButton") then btn = cur; break end
+        cur = cur.Parent
+    end
+    -- the "card" frame: climb until the ancestor is big enough to hold icon+title+price
+    local frame = obj.Parent
+    for _ = 1, 6 do
+        if not frame then break end
+        local sz = frame.AbsoluteSize
+        if sz.X >= 80 and sz.Y >= 80 then break end
+        frame = frame.Parent
+    end
+    if not btn and frame then
+        for _, d in ipairs(frame:GetDescendants()) do
+            if d:IsA("GuiButton") and d.AbsoluteSize.X > 20 and d.AbsoluteSize.Y > 15 then
+                btn = d; break
+            end
+        end
+    end
+    return btn or frame, frame -- fall back to a raw click on the card frame itself
+end
+
+-- finds the shop card whose title/icon label CONTAINS `label` (e.g. "x2 Gold" matches both the
+-- "x2 Gold" caption and a bare "VIP" icon badge). Only candidates actually ON SCREEN right now are
+-- considered (see isShownOnScreen) - this is the fix for the hidden-tab click-through bug. Several
+-- shown labels can still match (a short icon badge AND the full caption below it): the icon badge
+-- climbs to a tiny frame that excludes the price, so every match is tried and the one that actually
+-- resolves to a priced card wins, falling back to the first shown match (for the diagnostic log)
+-- only if none of them have a readable price.
+-- `quiet` suppresses the diagnostic warns (used by the "is the Gamepasses tab already open?"
+-- check, which runs every pass and would otherwise spam the console while idle).
+local function findShopCard(label, quiet)
     local pGui = player:FindFirstChild("PlayerGui")
     if not pGui then return nil end
     local wanted = label:lower()
+    local candidates = {}
     for _, obj in ipairs(pGui:GetDescendants()) do
-        if obj:IsA("TextLabel") and obj.Text:lower():match("^%s*(.-)%s*$") == wanted then
-            local frame = obj:FindFirstAncestorOfClass("Frame") or obj:FindFirstAncestorOfClass("ImageButton")
-            local cur, btn = obj.Parent, nil
-            for _ = 1, 5 do
-                if not cur then break end
-                if cur:IsA("GuiButton") then btn = cur break end
-                cur = cur.Parent
+        if (obj:IsA("TextLabel") or obj:IsA("TextButton")) and obj.AbsoluteSize.X > 0 then
+            local t = obj.Text:lower():gsub("%s+", " "):match("^%s*(.-)%s*$")
+            if t:find(wanted, 1, true) and isShownOnScreen(pGui, obj) then table.insert(candidates, obj) end
+        end
+    end
+    -- NOTHING matched at all - this was previously silent, which is exactly the gap that made
+    -- Extra Item / VIP / Free Stat Resets look like they "just don't work" with no clue why.
+    if #candidates == 0 then
+        if not quiet then
+            pcall(warn, string.format("[AutoBuyGamepass] no on-screen label contains '%s' right now (shop closed, wrong tab, or the real caption text is different)", label))
+        end
+        return nil
+    end
+
+    -- try the longest (most descriptive) caption first - a short icon badge rarely has the price nearby
+    table.sort(candidates, function(a, b) return #a.Text > #b.Text end)
+    if not quiet then
+        local texts = {}
+        for _, obj in ipairs(candidates) do table.insert(texts, "'" .. obj.Text:match("^%s*(.-)%s*$") .. "'") end
+        pcall(warn, string.format("[AutoBuyGamepass] '%s' matched %d on-screen label(s): %s", label, #candidates, table.concat(texts, ", ")))
+    end
+    local fallback
+    for _, obj in ipairs(candidates) do
+        local btn, frame = resolveCardClickTarget(obj)
+        if btn and isShownOnScreen(pGui, btn) then
+            if not fallback then fallback = { btn, frame, obj } end
+            local price = findCardPrice(frame, obj)
+            if price then
+                if not quiet then
+                    pcall(warn, string.format("[AutoBuyGamepass] matched '%s' -> label '%s', price=%s, clickTarget=%s (%s)",
+                        label, obj.Text, tostring(price), btn:GetFullName(), btn.ClassName))
+                end
+                return btn, frame, obj
+            elseif not quiet then
+                pcall(warn, string.format("[AutoBuyGamepass] candidate '%s' -> frame %s has NO readable price (not necessarily the final pick)",
+                    obj.Text, frame and frame:GetFullName() or "nil"))
             end
-            if not btn and frame then
-                for _, d in ipairs(frame:GetDescendants()) do
-                    if d:IsA("GuiButton") then btn = d break end
+        end
+    end
+    if fallback then
+        if not quiet then
+            pcall(warn, string.format("[AutoBuyGamepass] matched '%s' -> label '%s' but no candidate had a readable price, clickTarget=%s (%s)",
+                label, fallback[3].Text, fallback[1]:GetFullName(), fallback[1].ClassName))
+        end
+        return fallback[1], fallback[2], fallback[3]
+    end
+    return nil
+end
+
+-- true if ANY of the 4 priority cards (OWNED or not) is currently resolvable on screen - i.e. the
+-- shop is already open on the Gamepasses tab, so no navigation click is needed this pass.
+local function isGamepassesTabOpen()
+    local pGui = player:FindFirstChild("PlayerGui")
+    if not pGui then return false end
+    for _, label in ipairs(GAMEPASS_PRIORITY) do
+        local btn = findShopCard(label, true)
+        if btn then return true end
+    end
+    return false
+end
+
+-- Exact (not substring) case-insensitive text match, so this never fires on something like
+-- "Shop Now" inside an unrelated ad card or "Gamepass VIP" inside a card's own caption.
+-- Checks TextButton.Text directly, and - since the game's own "SHOP" HUD button turned out to be
+-- an ImageButton with a plain TextLabel child rather than a TextButton - also checks any GuiButton's
+-- direct TextLabel children for an exact match. Still a real click target either way (GuiButton).
+local function findExactTextButton(pGui, wantedSet)
+    for _, obj in ipairs(pGui:GetDescendants()) do
+        if obj:IsA("GuiButton") and obj.AbsoluteSize.X > 0 and not (UI.screenGui and obj:IsDescendantOf(UI.screenGui)) then
+            local text = obj:IsA("TextButton") and obj.Text or nil
+            if not text or text == "" then
+                for _, child in ipairs(obj:GetChildren()) do
+                    if child:IsA("TextLabel") and child.Text ~= "" then text = child.Text; break end
                 end
             end
-            if btn then return btn, frame, obj end
+            if text then
+                local t = text:lower():gsub("%s+", " "):match("^%s*(.-)%s*$")
+                if wantedSet[t] and isShownOnScreen(pGui, obj) then return obj end
+            end
         end
     end
     return nil
 end
 
--- price label inside a card: any other TextLabel reading like "40.0M" / "1,234".
-local function findCardPrice(frame, titleLabel)
-    if not frame then return nil end
-    for _, d in ipairs(frame:GetDescendants()) do
-        if d:IsA("TextLabel") and d ~= titleLabel then
-            local price = parseAbbrevPrice(d.Text:match("^%s*(.-)%s*$"))
-            if price then return price end
+local SHOP_OPEN_BUTTON_TEXTS = { shop = true }
+local GAMEPASS_TAB_BUTTON_TEXTS = { gamepass = true, gamepasses = true, ["game pass"] = true, ["game passes"] = true }
+local lastNavClickAt = 0
+
+-- Opens the shop and switches to the Gamepasses tab ON ITS OWN, but only ever by clicking a
+-- button whose text is an EXACT match ("shop" / "gamepass(es)") - never a substring match like
+-- findShopCard uses for the cards - so this can't accidentally land on an unrelated button. It
+-- also refuses to click anything while a purchase-confirmation-style popup is already on screen,
+-- and is rate-limited to one click attempt every 2s so a wrong/missing button is retried slowly
+-- instead of being hammered every frame. Returns true once the Gamepasses tab is confirmed open.
+local function ensureGamepassesTabOpen()
+    local pGui = player:FindFirstChild("PlayerGui")
+    if not pGui then return false end
+
+    -- never click anything while something that looks like a purchase confirmation is up
+    for _, obj in ipairs(pGui:GetDescendants()) do
+        if obj:IsA("TextButton") and CONFIRM_BUTTON_TEXTS[obj.Text:lower():match("^%s*(.-)%s*$")] and isShownOnScreen(pGui, obj) then
+            return false
         end
     end
-    return nil
+
+    if isGamepassesTabOpen() then return true end
+
+    local now = os.clock()
+    if now - lastNavClickAt < 2 then return false end
+
+    local gamepassTab = findExactTextButton(pGui, GAMEPASS_TAB_BUTTON_TEXTS)
+    if gamepassTab then
+        lastNavClickAt = now
+        pcall(warn, "[AutoBuyGamepass] clicking Gamepasses tab: " .. gamepassTab:GetFullName())
+        pressGuiButton(gamepassTab)
+        realClickButton(gamepassTab, 1)
+        return false
+    end
+
+    local shopBtn = findExactTextButton(pGui, SHOP_OPEN_BUTTON_TEXTS)
+    if shopBtn then
+        lastNavClickAt = now
+        pcall(warn, "[AutoBuyGamepass] clicking Shop button: " .. shopBtn:GetFullName())
+        pressGuiButton(shopBtn)
+        realClickButton(shopBtn, 1)
+        return false
+    end
+
+    lastNavClickAt = now
+    -- Exhaustive diagnostic dump instead of guessing again: lists every on-screen GuiObject whose text
+    -- CONTAINS "shop" (substring, loose) plus its class/path/size, so the real button (icon-only?
+    -- different wording? not a GuiButton at all?) can be identified from the console instead of blind-fixed.
+    pcall(function()
+        local found = {}
+        for _, obj in ipairs(pGui:GetDescendants()) do
+            if (obj:IsA("TextLabel") or obj:IsA("TextButton")) and obj.Text:lower():find("shop", 1, true) then
+                table.insert(found, string.format("%s '%s' (%s) shown=%s size=%dx%d",
+                    obj.ClassName, obj.Text:match("^%s*(.-)%s*$"), obj:GetFullName(),
+                    tostring(isShownOnScreen(pGui, obj)), obj.AbsoluteSize.X, obj.AbsoluteSize.Y))
+            end
+        end
+        if #found > 0 then
+            warn("[AutoBuyGamepass] no exact 'Shop' button matched, but these on-screen labels contain 'shop': " .. table.concat(found, " | "))
+        else
+            warn("[AutoBuyGamepass] no on-screen label/button anywhere contains the text 'shop' at all (it may be an icon with no text)")
+        end
+    end)
+    return false
 end
 
+-- only clicks a CONFIRM-style button that is actually shown, for the same hidden-tab reason as above
 local function clickConfirmPopupIfAny(pGui)
     task.wait(0.3)
     for _, obj in ipairs(pGui:GetDescendants()) do
-        if obj:IsA("TextButton") and CONFIRM_BUTTON_TEXTS[obj.Text:lower():match("^%s*(.-)%s*$")] then
+        if obj:IsA("TextButton") and CONFIRM_BUTTON_TEXTS[obj.Text:lower():match("^%s*(.-)%s*$")] and isShownOnScreen(pGui, obj) then
             pressGuiButton(obj)
             return
         end
     end
 end
 
--- one pass: buys at most the single highest-priority card it can currently afford, then returns
--- (re-evaluated from the top every pass, so priority order holds even as prices scale with level).
+-- one pass: makes sure the shop is open on the Gamepasses tab (see ensureGamepassesTabOpen - exact-
+-- text button matches only, rate-limited, and it refuses to click anything while a confirmation
+-- popup is up), then buys at most the single highest-priority card it can currently afford.
+-- Re-evaluated from the top every pass, so priority order holds even as prices scale with level.
 local function tryAutoBuyGamepass()
     local pGui = player:FindFirstChild("PlayerGui")
     if not pGui then return end
-    local gold = findPlayerStat({ "Gold", "gold", "Coins", "Money" })
-    if not gold then return end
+    if not ensureGamepassesTabOpen() then return end
+    local gold = findPlayerStat({ "Gold", "gold", "Coins", "Money" }) or findHudNumber({ "gold", "coin", "money" })
+    if not gold then
+        pcall(warn, "[AutoBuyGamepass] could not read your Gold amount (no leaderstat or HUD label found)")
+        return
+    end
     for _, label in ipairs(GAMEPASS_PRIORITY) do
-        local btn, frame, titleLabel = findShopCard(label)
+        -- quiet: this now runs every frame once the tab is open, so the full match/price
+        -- diagnostics from findShopCard would flood the console. The buy (or no-price) log
+        -- below still fires normally - only the per-frame "matched N labels" spam is silenced.
+        local btn, frame, titleLabel = findShopCard(label, true)
         if btn then
             local price = findCardPrice(frame, titleLabel)
-            if price and gold >= price then
+            if not price then
+                pcall(warn, "[AutoBuyGamepass] found '" .. label .. "' card but no price label in it")
+            elseif gold >= price then
+                pcall(warn, string.format("[AutoBuyGamepass] buying '%s' - price %s, you have %s", label, tostring(price), tostring(gold)))
                 pressGuiButton(btn)
                 realClickButton(btn, 1)
+                task.wait(0.15)
+                realClickButton(btn, 2)
                 clickConfirmPopupIfAny(pGui)
-                pcall(warn, "[AutoBuyGamepass] bought: " .. label)
                 return
             end
         end
@@ -7656,7 +7857,7 @@ end
 task.spawn(function()
     while not isCleaningUp do
         if SETTINGS.AutoBuyGamepass then pcall(tryAutoBuyGamepass) end
-        task.wait(3)
+        task.wait()
     end
 end)
 end -- AUTO BUY GAMEPASS
