@@ -100,7 +100,7 @@ end
 
 -- LIVE SETTINGS
 local SETTINGS = {
-    Autoplay = false,
+    Autoplay = true,
     MinDistance = 15,
     MaxDistance = 35,
     AttackReach = 45,
@@ -4503,9 +4503,48 @@ updateIgnoreKeywords()
 updateIgnoreEnemyNames()
 end
 
+-- Flip isAutoplay before anything below that could error (macro load, humanoid refs still
+-- settling right after a teleport) -- a downstream throw here used to silently abort this whole
+-- function before isAutoplay=true ran, leaving autoplay stuck OFF even though the saved config
+-- (and the button, last time the user looked) said it should be ON.
+local function startAutoplayFromConfig()
+    if SETTINGS.Autoplay ~= true then return end
+    isAutoplay = true
+    if selectedMacroName ~= "" then pcall(loadMacroFromFile, selectedMacroName) end
+    UI.dodgeBoostPool = SETTINGS.DodgeBoostStuds
+    UI.dodgeBoostLastPos, UI.dodgeBoostNormalSpeed = nil, nil
+    if humanoid then
+        if SETTINGS.GameplayMode == "Manual Play" then
+            humanoid.AutoRotate = true
+            humanoid.WalkSpeed = 16
+            if alignOrient then alignOrient.Enabled = false end
+        else
+            humanoid.WalkSpeed = (SETTINGS.GameplayMode == "Legit Player") and 16 or MOVE_SPEED
+            humanoid.AutoRotate = false
+            if alignOrient then alignOrient.Enabled = true end
+        end
+    end
+    if UI.runMacroBtn then
+        UI.runMacroBtn.Text = "■  STOP AUTOPLAY"
+        UI.runMacroBtn.BackgroundColor3 = UI.theme.pink
+    end
+    if SETTINGS.AutoHideUI and UI.setMinimized then
+        task.delay(2, function() if isAutoplay then UI.setMinimized(true) end end)
+    end
+end
+
 local function loadConfigAndAutoExecute()
 refreshMacroList()
-if not readfile or not isfile or not isfile(CONFIG_FILE) then return end
+if not readfile or not isfile or not isfile(CONFIG_FILE) then
+    -- No saved config yet (first run on this account): the toggles already show the SETTINGS
+    -- defaults, but nothing actually applies them until applyConfigData runs below - without this,
+    -- a fresh account sees "Black Screen: ON" / "Autoplay: ON" etc. in the UI while the feature itself never activates.
+    if UI.applyBlackScreen then UI.applyBlackScreen(SETTINGS.BlackScreen, true) end
+    if UI.applyRemoveMap then UI.applyRemoveMap(SETTINGS.RemoveMap, true) end
+    if UI.applyFpsBoost then UI.applyFpsBoost(SETTINGS.FpsBoost, true) end
+    startAutoplayFromConfig()
+    return
+end
 local readSuccess, fileData = pcall(function() return readfile(CONFIG_FILE) end)
 if not readSuccess or not fileData then return end
 local success, cfg = pcall(function() return HttpService:JSONDecode(fileData) end)
@@ -4513,35 +4552,7 @@ local success, cfg = pcall(function() return HttpService:JSONDecode(fileData) en
 if success and type(cfg) == "table" then
     local applyOk = pcall(applyConfigData, cfg)
     if not applyOk then pcall(warn, "[Autoplay] applyConfigData failed on resume, using defaults for whatever didn't parse") end
-
-    if SETTINGS.Autoplay == true then
-        -- Flip isAutoplay before anything below that could error (macro load, humanoid refs still
-        -- settling right after a teleport) -- a downstream throw here used to silently abort this whole
-        -- function before isAutoplay=true ran, leaving autoplay stuck OFF even though the saved config
-        -- (and the button, last time the user looked) said it should be ON.
-        isAutoplay = true
-        if selectedMacroName ~= "" then pcall(loadMacroFromFile, selectedMacroName) end
-        UI.dodgeBoostPool = SETTINGS.DodgeBoostStuds
-        UI.dodgeBoostLastPos, UI.dodgeBoostNormalSpeed = nil, nil
-        if humanoid then
-            if SETTINGS.GameplayMode == "Manual Play" then
-                humanoid.AutoRotate = true
-                humanoid.WalkSpeed = 16
-                if alignOrient then alignOrient.Enabled = false end
-            else
-                humanoid.WalkSpeed = (SETTINGS.GameplayMode == "Legit Player") and 16 or MOVE_SPEED
-                humanoid.AutoRotate = false
-                if alignOrient then alignOrient.Enabled = true end
-            end
-        end
-        if UI.runMacroBtn then
-            UI.runMacroBtn.Text = "■  STOP AUTOPLAY"
-            UI.runMacroBtn.BackgroundColor3 = UI.theme.pink
-        end
-        if SETTINGS.AutoHideUI and UI.setMinimized then
-            task.delay(2, function() if isAutoplay then UI.setMinimized(true) end end)
-        end
-    end
+    startAutoplayFromConfig()
 end
 end
 
